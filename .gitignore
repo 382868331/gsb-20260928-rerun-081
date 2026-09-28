@@ -6,3 +6,6 @@ __pycache__/
 .env.*
 *.pem
 *.key
+bin/
+data/
+cmd/server/webdist/assets/
