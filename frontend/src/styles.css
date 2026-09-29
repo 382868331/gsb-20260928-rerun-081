@@ -1,0 +1,92 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f1f5f9;
+  color: #0f172a;
+}
+.app { height: 100vh; display: flex; flex-direction: column; }
+header {
+  display: flex; align-items: center; gap: 24px;
+  padding: 10px 20px; background: #0f172a; color: #fff;
+}
+header h1 { font-size: 17px; margin: 0; }
+nav button {
+  background: transparent; color: #cbd5e1; border: 1px solid #334155;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; margin-right: 8px;
+}
+nav button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+.editor-layout, .instance-layout {
+  flex: 1; display: grid; gap: 10px; padding: 10px; min-height: 0;
+}
+.editor-layout { grid-template-columns: 300px 1fr 260px; }
+.instance-layout { grid-template-columns: 300px 1fr 340px; }
+
+.panel {
+  background: #fff; border-radius: 10px; padding: 14px; overflow: auto;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, .08);
+}
+.panel h2 { font-size: 15px; margin: 4px 0 10px; }
+.panel h3 { font-size: 13px; margin: 14px 0 6px; }
+label { display: block; font-size: 12px; color: #475569; margin-bottom: 8px; }
+input, select, textarea {
+  width: 100%; margin-top: 3px; padding: 6px 8px; border: 1px solid #cbd5e1;
+  border-radius: 6px; font-size: 13px; font-family: inherit;
+}
+textarea { resize: vertical; }
+button {
+  background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px;
+  padding: 6px 10px; font-size: 13px; cursor: pointer;
+}
+button:hover { background: #e2e8f0; }
+button.primary { background: #2563eb; color: #fff; border-color: #2563eb; width: 100%; margin-top: 8px; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.btn-row button { flex: 1 1 40%; }
+.canvas {
+  background: #fff; border-radius: 10px; position: relative; min-height: 0;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, .08);
+}
+.canvas .react-flow { border-radius: 10px; }
+
+.hint { font-size: 11px; color: #64748b; }
+.error { color: #dc2626; font-size: 12px; margin-top: 6px; }
+.edge-list, .instance-list { list-style: none; padding: 0; margin: 0; font-size: 12px; }
+.edge-list li { padding: 5px 0; border-bottom: 1px solid #f1f5f9; }
+.link-danger { color: #dc2626; background: none; border: none; padding: 0 0 0 8px; }
+.version-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+.badge { background: #dbeafe; color: #1d4ed8; border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+
+.instance-list li {
+  padding: 8px; border-radius: 8px; margin-bottom: 6px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 2px; border: 1px solid #e2e8f0;
+}
+.instance-list li.active { background: #eff6ff; border-color: #2563eb; }
+.status {
+  display: inline-block; font-size: 11px; border-radius: 999px; padding: 2px 10px;
+}
+.status.running { background: #fef9c3; color: #854d0e; }
+.status.waiting { background: #ede9fe; color: #5b21b6; }
+.status.completed { background: #dcfce7; color: #166534; }
+.status.failed { background: #fee2e2; color: #991b1b; }
+
+.execution-bar {
+  position: absolute; top: 10px; left: 10px; z-index: 5; display: flex;
+  gap: 12px; align-items: center; background: rgba(255,255,255,.95);
+  border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 12px; font-size: 12px;
+}
+.waiting-tag { color: #5b21b6; font-weight: 600; }
+.arrow-note { position: absolute; bottom: 8px; left: 12px; z-index: 5; background: rgba(255,255,255,.9); padding: 2px 8px; border-radius: 6px; }
+.empty { display: flex; align-items: center; justify-content: center; height: 100%; color: #94a3b8; }
+
+.records { max-height: 50vh; overflow: auto; }
+.record {
+  display: flex; gap: 8px; font-size: 12px; padding: 6px 4px;
+  border-left: 3px solid #cbd5e1; padding-left: 8px; margin-bottom: 4px; background: #f8fafc;
+}
+.record .seq { color: #94a3b8; min-width: 32px; }
+.record-fail, .record-compensation_fail { border-left-color: #dc2626; background: #fef2f2; }
+.record-wait { border-left-color: #7c3aed; background: #f5f3ff; }
+.record-compensated, .record-compensate { border-left-color: #ea580c; background: #fff7ed; }
+.record-branch, .record-traverse { border-left-color: #16a34a; }
+.record em { color: #64748b; font-style: normal; }

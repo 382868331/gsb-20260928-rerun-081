@@ -1,0 +1,231 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"flowplatform/internal/engine"
+	"flowplatform/internal/model"
+	"flowplatform/internal/store"
+)
+
+type Server struct {
+	store  *store.Store
+	engine *engine.Engine
+}
+
+func NewHandler(st *store.Store, eng *engine.Engine) http.Handler {
+	s := &Server{store: st, engine: eng}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("/api/definitions", s.definitions)
+	mux.HandleFunc("/api/definitions/", s.getDef)
+	mux.HandleFunc("/api/instances", s.instances)
+	mux.HandleFunc("/api/instances/", s.instanceRoutes)
+	return logging(cors(mux))
+}
+
+func (s *Server) definitions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listDefs(w, r)
+	case http.MethodPost:
+		s.publish(w, r)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, errMissing("method"))
+	}
+}
+
+func (s *Server) instances(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listInstances(w, r)
+	case http.MethodPost:
+		s.startInstance(w, r)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, errMissing("method"))
+	}
+}
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type publishReq struct {
+	Name  string       `json:"name"`
+	Nodes []model.Node `json:"nodes"`
+	Edges []model.Edge `json:"edges"`
+}
+
+func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
+	var req publishReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeErr(w, http.StatusBadRequest, errMissing("name"))
+		return
+	}
+	def, err := s.store.PublishDraft(req.Name, req.Nodes, req.Edges)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, def)
+}
+
+func (s *Server) listDefs(w http.ResponseWriter, r *http.Request) {
+	defs, err := s.store.ListDefinitions()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, defs)
+}
+
+func (s *Server) getDef(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/definitions/")
+	def, err := s.store.GetDefinition(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, def)
+}
+
+type startReq struct {
+	DefinitionID string         `json:"definitionId"`
+	Name         string         `json:"name"` // fallback: start latest by process name
+	Data         map[string]any `json:"data"`
+}
+
+func (s *Server) startInstance(w http.ResponseWriter, r *http.Request) {
+	var req startReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var def *model.Definition
+	var err error
+	if req.DefinitionID != "" {
+		def, err = s.store.GetDefinition(req.DefinitionID)
+	} else {
+		def, err = s.store.LatestDefinition(req.Name)
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	inst, err := s.store.CreateInstance(def, req.Data)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	// Execute to first wait/completion/failure, then persist.
+	s.engine.Run(def, inst)
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, inst)
+}
+
+func (s *Server) listInstances(w http.ResponseWriter, r *http.Request) {
+	list, err := s.store.ListInstances()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// instanceRoutes dispatches /api/instances/{id} and /api/instances/{id}/inputs
+func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/instances/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeErr(w, http.StatusNotFound, errMissing("id"))
+		return
+	}
+	id := parts[0]
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		inst, err := s.store.GetInstance(id)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, err)
+			return
+		}
+		def, _ := s.store.GetDefinition(inst.DefinitionID)
+		writeJSON(w, http.StatusOK, map[string]any{"instance": inst, "definition": def})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "inputs" && r.Method == http.MethodPost {
+		s.deliverInput(w, r, id)
+		return
+	}
+	writeErr(w, http.StatusNotFound, errMissing("route"))
+}
+
+func (s *Server) deliverInput(w http.ResponseWriter, r *http.Request, id string) {
+	var input model.ExternalInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	// Definition is pinned at start time; republishing never mutates running instances.
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.engine.DeliverInput(def, inst, input); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, code int, err error) {
+	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+func errMissing(s string) error { return &simpleError{msg: "缺少参数: " + s} }
+
+type simpleError struct{ msg string }
+
+func (e *simpleError) Error() string { return e.msg }
+
+func cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+	})
+}
