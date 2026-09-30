@@ -38,6 +38,24 @@ export interface StepRecord {
   occurredAt: string;
 }
 
+export interface AffectedStep {
+  nodeId: string;
+  name: string;
+  kind: string;
+  issue: string;
+  blocking: boolean;
+}
+
+export interface MigrationPreview {
+  instanceId: string;
+  fromDefinition: string;
+  fromVersion: number;
+  toDefinition: string;
+  toVersion: number;
+  canMigrate: boolean;
+  affectedSteps: AffectedStep[];
+}
+
 export interface Instance {
   id: string;
   definitionId: string;

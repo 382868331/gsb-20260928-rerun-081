@@ -22,7 +22,9 @@ const ACTION_LABEL: Record<string, string> = {
   compensated: "补偿生效",
   compensation_fail: "补偿失败",
   compensate_done: "补偿全部完成",
-  complete: "流程完成"
+  complete: "流程完成",
+  migrate: "定义版本迁移",
+  skip_redone: "跳过重放"
 };
 
 export function stopLabel(inst: Instance, def?: Definition): string {

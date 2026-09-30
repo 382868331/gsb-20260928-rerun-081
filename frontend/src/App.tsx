@@ -14,15 +14,26 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "history", label: "执行历史" }
 ];
 
+const TAB_KEY = "flow.ui.tab";
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>("definitions");
+  // Refresh must not lose the user's place: restore the last active tab.
+  const [tab, setTabState] = useState<Tab>(() => {
+    const saved = localStorage.getItem(TAB_KEY);
+    return saved === "instances" || saved === "history" ? saved : "definitions";
+  });
+  const setTab = useCallback((t: Tab) => {
+    localStorage.setItem(TAB_KEY, t);
+    setTabState(t);
+  }, []);
   const [definitions, setDefinitions] = useState<Definition[]>([]);
   const [error, setError] = useState("");
 
   const loadDefs = useCallback(async () => {
     try {
       setError("");
-      setDefinitions(await api.listDefinitions());
+      // Empty first-run collection must stay an array, never crash the page.
+      setDefinitions((await api.listDefinitions()) ?? []);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -61,7 +72,12 @@ export default function App() {
             </button>
           ))}
         </nav>
-        {error && <span className="error header-error">{error}（请确认后端已在 :8080 启动）</span>}
+        {error && (
+          <span className="error header-error">
+            加载失败：{error}（已有操作已保留，可）
+            <button className="link" onClick={loadDefs}>重试</button>
+          </span>
+        )}
       </header>
       <ErrorBoundary>
         {tab === "definitions" && <Editor definitions={definitions} onPublish={publish} />}

@@ -11,7 +11,7 @@ export function History({ definitions }: { definitions: Definition[] }) {
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
-    const list = await api.listInstances();
+    const list = (await api.listInstances()) ?? [];
     setInstances(list);
     if (!selectedId && list[0]) setSelectedId(list[0].id);
   }, [selectedId]);

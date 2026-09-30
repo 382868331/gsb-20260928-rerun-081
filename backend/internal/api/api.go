@@ -191,6 +191,10 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.resumeInstance(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "migrate" && r.Method == http.MethodPost {
+		s.migrateInstance(w, r, id)
+		return
+	}
 	writeErr(w, http.StatusNotFound, errMissing("route"))
 }
 
@@ -220,6 +224,60 @@ func (s *Server) deliverInput(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	writeJSON(w, http.StatusOK, inst)
+}
+
+type migrateReq struct {
+	TargetDefinitionID string `json:"targetDefinitionId"`
+	Confirm            bool   `json:"confirm"`
+}
+
+// migrateInstance previews (confirm=false) or performs (confirm=true) moving
+// a waiting instance to a newer definition version. Running instances keep
+// their pinned definition; only explicit, confirmed migration changes it.
+func (s *Server) migrateInstance(w http.ResponseWriter, r *http.Request, id string) {
+	var req migrateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	if inst.Status != model.StatusWaiting {
+		writeErr(w, http.StatusConflict, errMissing("仅等待人工输入的实例可以迁移定义版本"))
+		return
+	}
+	from, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	to, err := s.store.GetDefinition(req.TargetDefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if to.Name != from.Name {
+		writeErr(w, http.StatusBadRequest, errMissing("只能迁移到同名流程的新版本"))
+		return
+	}
+	preview := engine.PreviewMigration(inst, from, to)
+	if !req.Confirm {
+		writeJSON(w, http.StatusOK, map[string]any{"preview": preview})
+		return
+	}
+	if !preview.CanMigrate {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "存在阻断项，无法迁移", "preview": preview})
+		return
+	}
+	s.engine.Migrate(inst, from, to)
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"instance": inst, "preview": preview})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

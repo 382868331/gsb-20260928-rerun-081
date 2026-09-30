@@ -1,4 +1,4 @@
-import type { Definition, FlowEdge, FlowNode, Instance } from "./types";
+import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -34,5 +34,15 @@ export const api = {
       body: JSON.stringify({ waitNode, key, payload })
     }),
   resumeInstance: (id: string) =>
-    req<Instance>("/api/instances/" + id + "/resume", { method: "POST" })
+    req<Instance>("/api/instances/" + id + "/resume", { method: "POST" }),
+  previewMigration: (id: string, targetDefinitionId: string) =>
+    req<{ preview: MigrationPreview }>("/api/instances/" + id + "/migrate", {
+      method: "POST",
+      body: JSON.stringify({ targetDefinitionId, confirm: false })
+    }),
+  confirmMigration: (id: string, targetDefinitionId: string) =>
+    req<{ instance: Instance; preview: MigrationPreview }>("/api/instances/" + id + "/migrate", {
+      method: "POST",
+      body: JSON.stringify({ targetDefinitionId, confirm: true })
+    })
 };

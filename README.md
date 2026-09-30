@@ -1,5 +1,16 @@
 # 业务流程运行平台（第一轮）
 
+## 第二轮新增
+
+- **空数据首次可用**：定义/实例空集合返回 `[]` 而非 `null`，页面不再白屏；三个页签始终可见，空列表显示引导提示（先发布定义再启动实例）
+- **三类反馈区分**：空列表（引导提示）、加载失败（页头错误条 + 重试，保留已有数据）、执行失败（面板内联错误）
+- **刷新不丢操作**：当前页签、编辑器草稿（名称/节点/边）、实例表单与选中实例均持久化在 localStorage
+- **等待中实例的版本迁移**：等待人工输入的实例可迁移到同名流程的新版本。先 `POST /api/instances/{id}/migrate`（不带 confirm）预览受影响步骤，用户确认后再带 `confirm: true` 执行；当前等待步骤在新版本被删除或改类型时阻断迁移。运行中/已结束实例不可迁移，新实例自动采用最新版本
+- **历史不拼接**：迁移只在同一事件流追加一条 `migrate` 记录，已完成步骤绝不按新定义重放
+- **续跑幂等**：重启恢复时，已有 `succeed` 记录的节点跳过重放（记 `skip_redone`）；崩溃在补偿中途的实例先补完补偿链，同一步绝不重复补偿
+
+## 第一轮
+
 Go 流程引擎 + React 流程编辑器。第一轮交付：
 
 - 可视化流程编辑与**版本发布**：每次发布生成不可变的新版本定义
@@ -50,6 +61,7 @@ cd ../backend && go run ./cmd/server -static ../frontend/dist
 - `GET  /api/instances` / `GET /api/instances/{id}`（返回实例 + 其固定版本定义）
 - `POST /api/instances/{id}/inputs` 人工输入 `{waitNode, key, payload}`
 - `POST /api/instances/{id}/resume` 重启后把 `running` 实例推进到下一个等待/结束/失败
+- `POST /api/instances/{id}/migrate` 等待中实例迁移定义版本 `{targetDefinitionId, confirm}`；`confirm=false` 返回受影响步骤预览，`confirm=true` 执行迁移
 
 重复与迟到输入的返回均为 200：是否生效看实例事件流中的 `input_received` / `duplicate_input` / `late_input`，业务动作永远不会因为重试而执行第二次。
 

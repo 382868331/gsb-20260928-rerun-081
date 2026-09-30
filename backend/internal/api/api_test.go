@@ -116,6 +116,114 @@ func TestHTTPEndToEndAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestHTTPEmptyCollectionsAreArrays(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data-empty")
+	h, _ := setup(t, dir)
+	for _, path := range []string{"/api/definitions", "/api/instances"} {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 200 || w.Body.String() != "[]\n" {
+			t.Fatalf("%s 首次空集合必须返回 [], got %d %q", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestHTTPMigrateWaitingInstance(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data-mig")
+	h, _ := setup(t, dir)
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "t1", Type: model.NodeTask, Name: "任务1"},
+		{ID: "w", Type: model.NodeWait, Name: "人工"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{
+		{ID: "a", From: "s", To: "t1"},
+		{ID: "b", From: "t1", To: "w"},
+		{ID: "c", From: "w", To: "e"},
+	}
+	var v1 model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes, "edges": edges}, &v1)
+	var inst model.Instance
+	do(t, h, "POST", "/api/instances", map[string]any{"definitionId": v1.ID, "data": map[string]any{}}, &inst)
+	if inst.Status != model.StatusWaiting {
+		t.Fatalf("应等待, got %s", inst.Status)
+	}
+
+	// v2 keeps the wait node, adds a parallel task.
+	nodes2 := append(append([]model.Node{}, nodes...), model.Node{ID: "t2", Type: model.NodeTask, Name: "任务2"})
+	edges2 := append(append([]model.Edge{}, edges...), model.Edge{ID: "d", From: "t1", To: "t2"}, model.Edge{ID: "e2", From: "t2", To: "w"})
+	var v2 model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes2, "edges": edges2}, &v2)
+
+	// Preview: no mutation.
+	var prev struct {
+		Preview struct {
+			CanMigrate    bool `json:"canMigrate"`
+			AffectedSteps []struct {
+				NodeID string `json:"nodeId"`
+				Kind   string `json:"kind"`
+			} `json:"affectedSteps"`
+		} `json:"preview"`
+	}
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/migrate", map[string]any{"targetDefinitionId": v2.ID}, &prev); code != 200 {
+		t.Fatalf("preview code=%d", code)
+	}
+	if !prev.Preview.CanMigrate || len(prev.Preview.AffectedSteps) == 0 {
+		t.Fatalf("预览应可迁移且列出受影响步骤: %+v", prev.Preview)
+	}
+	var got struct {
+		Instance model.Instance `json:"instance"`
+	}
+	do(t, h, "GET", "/api/instances/"+inst.ID, nil, &got)
+	if got.Instance.DefinitionID != v1.ID {
+		t.Fatal("预览不得改变实例固定定义")
+	}
+
+	// Confirm: migrates, history stays continuous, input completes on new def.
+	var mig struct {
+		Instance model.Instance `json:"instance"`
+	}
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/migrate", map[string]any{"targetDefinitionId": v2.ID, "confirm": true}, &mig); code != 200 {
+		t.Fatalf("confirm code=%d", code)
+	}
+	if mig.Instance.DefinitionID != v2.ID || mig.Instance.Version != 2 {
+		t.Fatal("确认后应固定到新版本")
+	}
+	var done model.Instance
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{"waitNode": "w", "key": "k1", "payload": map[string]any{}}, &done)
+	if done.Status != model.StatusCompleted {
+		t.Fatalf("迁移后输入应完成, got %s", done.Status)
+	}
+	migrateEvents := 0
+	for _, r := range done.Records {
+		if r.Action == "migrate" {
+			migrateEvents++
+		}
+	}
+	if migrateEvents != 1 {
+		t.Fatalf("历史只能有一条 migrate 事件, got %d", migrateEvents)
+	}
+}
+
+func TestHTTPMigrateRejectsNonWaiting(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data-mig2")
+	h, _ := setup(t, dir)
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{{ID: "a", From: "s", To: "e"}}
+	var v1 model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes, "edges": edges}, &v1)
+	var inst model.Instance
+	do(t, h, "POST", "/api/instances", map[string]any{"definitionId": v1.ID, "data": map[string]any{}}, &inst)
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/migrate", map[string]any{"targetDefinitionId": v1.ID, "confirm": true}, nil); code != http.StatusConflict {
+		t.Fatalf("非等待实例迁移应 409, got %d", code)
+	}
+}
+
 func progressEvents(recs []model.StepRecord) int {
 	n := 0
 	for _, r := range recs {

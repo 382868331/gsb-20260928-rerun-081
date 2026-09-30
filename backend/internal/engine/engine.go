@@ -42,12 +42,23 @@ func (e *Engine) addRecord(inst *model.Instance, nodeID, edgeID, action string, 
 	})
 }
 
-// Run executes forward until the instance completes, waits, or fails
+// Run executes forward until the instance completes, waits, or fails.
 // (with compensation attempted). Safe to call again after restart.
 func (e *Engine) Run(def *model.Definition, inst *model.Instance) {
 	nodeMap := map[string]model.Node{}
 	for _, n := range def.Nodes {
 		nodeMap[n.ID] = n
+	}
+	// Crash mid-compensation: a fail was recorded but the compensation
+	// chain never reached a terminal record. Finish compensating first
+	// instead of moving forward or redoing any step.
+	if inst.Status == model.StatusRunning && compensationPending(inst) {
+		failed, ok := nodeMap[lastFailedNode(inst)]
+		if !ok {
+			failed = model.Node{ID: inst.StoppedAt, Name: inst.StoppedAt}
+		}
+		e.compensateBackward(def, inst, failed)
+		return
 	}
 	for inst.Status == model.StatusRunning {
 		node, ok := nodeMap[inst.CurrentNode]
@@ -69,6 +80,13 @@ func (e *Engine) Run(def *model.Definition, inst *model.Instance) {
 			e.advance(def, inst, node, "")
 		case model.NodeTask:
 			e.addRecord(inst, node.ID, "", "enter", model.NodeEntered, node.Name)
+			if alreadySucceeded(inst, node.ID) {
+				// Restarted after a crash between executing the task and
+				// persisting: never complete the same step twice.
+				e.addRecord(inst, node.ID, "", "skip_redone", model.NodeSucceeded, "节点已生效过，跳过重放")
+				e.advance(def, inst, node, "")
+				continue
+			}
 			if err := e.task(inst, node); err != nil {
 				e.addRecord(inst, node.ID, "", "fail", model.NodeFailed, err.Error())
 				e.compensateBackward(def, inst, node)
@@ -94,6 +112,53 @@ func (e *Engine) Run(def *model.Definition, inst *model.Instance) {
 			return
 		}
 	}
+}
+
+// compensationPending reports whether records show a failure whose
+// compensation chain never reached a terminal record (crash mid-compensation).
+func compensationPending(inst *model.Instance) bool {
+	lastFail := -1
+	terminal := false
+	for i, rec := range inst.Records {
+		switch rec.Action {
+		case "fail":
+			lastFail = i
+			terminal = false
+		case "compensate_done", "compensation_fail":
+			if i > lastFail {
+				terminal = true
+			}
+		}
+	}
+	return lastFail >= 0 && !terminal
+}
+
+// lastFailedNode returns the node id of the most recent fail record.
+func lastFailedNode(inst *model.Instance) string {
+	for i := len(inst.Records) - 1; i >= 0; i-- {
+		if inst.Records[i].Action == "fail" {
+			return inst.Records[i].NodeID
+		}
+	}
+	return inst.StoppedAt
+}
+
+// alreadySucceeded reports whether the node has a succeed record that was
+// not later compensated — used to avoid completing the same step twice.
+func alreadySucceeded(inst *model.Instance, nodeID string) bool {
+	succeeded := false
+	for _, rec := range inst.Records {
+		if rec.NodeID != nodeID {
+			continue
+		}
+		switch rec.Action {
+		case "succeed":
+			succeeded = true
+		case "compensated":
+			succeeded = false
+		}
+	}
+	return succeeded
 }
 
 func edgeLabel(edge model.Edge) string {
@@ -213,6 +278,9 @@ func (e *Engine) compensateBackward(def *model.Definition, inst *model.Instance,
 	// The failed node itself may have a compensator too; include tasks reversed.
 	for i := len(succeeded) - 1; i >= 0; i-- {
 		node := nodeMap[succeeded[i]]
+		if alreadyCompensated(inst, node.ID) {
+			continue // crash-safe: never compensate the same step twice
+		}
 		targetID := node.CompensateTo
 		if targetID == "" {
 			targetID = node.ID
@@ -230,6 +298,15 @@ func (e *Engine) compensateBackward(def *model.Definition, inst *model.Instance,
 	e.addRecord(inst, failed.ID, "", "compensate_done", model.NodeFailed, "失败后补偿全部完成")
 	inst.Status = model.StatusFailed
 	inst.StoppedAt = failed.ID
+}
+
+func alreadyCompensated(inst *model.Instance, nodeID string) bool {
+	for _, rec := range inst.Records {
+		if rec.NodeID == nodeID && rec.Action == "compensated" {
+			return true
+		}
+	}
+	return false
 }
 
 func outgoing(edges []model.Edge, from string) []model.Edge {

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ReactFlow, ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Definition, FlowNode, NodeType } from "../types";
@@ -12,10 +12,32 @@ interface Props {
 
 let counter = 100;
 
+const DRAFT_KEY = "flow.editor.draft";
+
+interface Draft {
+  name: string;
+  nodes: FlowNode[];
+  edges: typeof templateEdges;
+}
+
+function loadDraft(): Draft | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as Draft;
+    if (!Array.isArray(d.nodes) || !Array.isArray(d.edges)) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
+
 export function Editor({ definitions, onPublish }: Props) {
-  const [name, setName] = useState("order-demo");
-  const [nodes, setNodes] = useState<FlowNode[]>(templateNodes);
-  const [edges, setEdges] = useState(templateEdges);
+  // Restore the in-progress draft so a refresh never loses editing work.
+  const [draft] = useState<Draft | null>(loadDraft);
+  const [name, setName] = useState(draft?.name ?? "order-demo");
+  const [nodes, setNodes] = useState<FlowNode[]>(draft?.nodes ?? templateNodes);
+  const [edges, setEdges] = useState(draft?.edges ?? templateEdges);
   const [selected, setSelected] = useState<string | null>("check");
   const [from, setFrom] = useState("check");
   const [to, setTo] = useState("end");
@@ -23,6 +45,10 @@ export function Editor({ definitions, onPublish }: Props) {
   const [edgeLabel, setEdgeLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ name, nodes, edges }));
+  }, [name, nodes, edges]);
 
   const flow = useMemo(() => definitionToFlow({ nodes, edges }), [nodes, edges]);
   const selectedNode = nodes.find((n) => n.id === selected) || null;

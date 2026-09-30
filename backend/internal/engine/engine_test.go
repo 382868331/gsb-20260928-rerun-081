@@ -192,6 +192,156 @@ func TestConditionBranchFalsePath(t *testing.T) {
 	}
 }
 
+func TestMigrateWaitingInstanceKeepsHistoryContinuous(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	nodes, edges := sampleNodes()
+	v1, _ := st.PublishDraft("order", nodes, edges)
+	inst, _ := st.CreateInstance(v1, map[string]any{"amount": float64(100)})
+	eng.Run(v1, inst)
+	if inst.Status != model.StatusWaiting {
+		t.Fatalf("应等待, got %s", inst.Status)
+	}
+	before := len(inst.Records)
+
+	// v2 adds an extra task after ship but keeps the wait node.
+	nodes2 := append(append([]model.Node{}, nodes...), model.Node{ID: "extra", Type: model.NodeTask, Name: "额外步骤"})
+	var edges2 []model.Edge
+	for _, e := range edges {
+		if e.ID != "e5" { // replace ship->end with ship->extra->end
+			edges2 = append(edges2, e)
+		}
+	}
+	edges2 = append(edges2,
+		model.Edge{ID: "e6", From: "ship", To: "extra"},
+		model.Edge{ID: "e7", From: "extra", To: "end"})
+	v2, err := st.PublishDraft("order", nodes2, edges2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prev := engine.PreviewMigration(inst, v1, v2)
+	if !prev.CanMigrate {
+		t.Fatalf("等待节点保留时应可迁移: %+v", prev.AffectedSteps)
+	}
+	eng.Migrate(inst, v1, v2)
+	if inst.DefinitionID != v2.ID || inst.Version != 2 {
+		t.Fatal("迁移后应固定到新定义")
+	}
+	if len(inst.Records) != before+1 || inst.Records[len(inst.Records)-1].Action != "migrate" {
+		t.Fatal("迁移只能追加一条 migrate 事件，历史不得拼接")
+	}
+	// Input after migration follows the NEW definition and completes.
+	if err := eng.DeliverInput(v2, inst, model.ExternalInput{Key: "k1"}); err != nil {
+		t.Fatal(err)
+	}
+	if inst.Status != model.StatusCompleted {
+		t.Fatalf("迁移后应按新定义推进至完成, got %s", inst.Status)
+	}
+	if got := countAction(inst.Records, "succeed"); got != 3 { // reserve, ship, extra
+		t.Fatalf("新旧定义历史不得拼接重放, succeed=%d", got)
+	}
+}
+
+func TestMigrateBlockedWhenWaitNodeRemoved(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	nodes, edges := sampleNodes()
+	v1, _ := st.PublishDraft("order", nodes, edges)
+	inst, _ := st.CreateInstance(v1, map[string]any{"amount": float64(100)})
+	eng.Run(v1, inst)
+
+	// v2 removes the wait node entirely.
+	var nodes2 []model.Node
+	for _, n := range nodes {
+		if n.ID != "manual" {
+			nodes2 = append(nodes2, n)
+		}
+	}
+	var edges2 []model.Edge
+	for _, e := range edges {
+		if e.From != "manual" && e.To != "manual" {
+			edges2 = append(edges2, e)
+		}
+	}
+	edges2 = append(edges2, model.Edge{ID: "e9", From: "reserve", To: "ship"})
+	v2, err := st.PublishDraft("order", nodes2, edges2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := engine.PreviewMigration(inst, v1, v2)
+	if prev.CanMigrate {
+		t.Fatal("等待节点被删除时必须阻断迁移")
+	}
+	hasBlocking := false
+	for _, s := range prev.AffectedSteps {
+		if s.Blocking && s.NodeID == "manual" {
+			hasBlocking = true
+		}
+	}
+	if !hasBlocking {
+		t.Fatal("预览必须列出被删除的等待步骤为阻断项")
+	}
+}
+
+func TestResumeDoesNotRedoSucceededStep(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	nodes, edges := sampleNodes()
+	def, _ := st.PublishDraft("order", nodes, edges)
+	inst, _ := st.CreateInstance(def, map[string]any{"amount": float64(100)})
+	eng.Run(def, inst)
+	// Simulate crash persisted mid-flight: instance still "running" parked on
+	// a node that already has a succeed record.
+	inst.Status = model.StatusRunning
+	inst.CurrentNode = "reserve"
+	eng.Resume(def, inst)
+	if got := countAction(inst.Records, "succeed"); got != 1 {
+		t.Fatalf("重开继续不得重复完成同一步, succeed=%d", got)
+	}
+	if countAction(inst.Records, "skip_redone") != 1 {
+		t.Fatal("应记录 skip_redone 事件")
+	}
+	if inst.Status != model.StatusWaiting {
+		t.Fatalf("应继续推进到等待, got %s", inst.Status)
+	}
+}
+
+func TestResumeFinishesInterruptedCompensation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	nodes, edges := sampleNodes()
+	def, _ := st.PublishDraft("order", nodes, edges)
+	inst, _ := st.CreateInstance(def, map[string]any{"amount": float64(100), "failAt": "ship"})
+	eng.Run(def, inst)
+	if err := eng.DeliverInput(def, inst, model.ExternalInput{Key: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	if inst.Status != model.StatusFailed {
+		t.Fatalf("应失败, got %s", inst.Status)
+	}
+	// Simulate crash mid-compensation: strip terminal record, back to running.
+	var kept []model.StepRecord
+	for _, r := range inst.Records {
+		if r.Action != "compensate_done" {
+			kept = append(kept, r)
+		}
+	}
+	inst.Records = kept
+	inst.Status = model.StatusRunning
+	compBefore := countAction(inst.Records, "compensated")
+	eng.Resume(def, inst)
+	if inst.Status != model.StatusFailed {
+		t.Fatalf("补偿续跑后应失败, got %s", inst.Status)
+	}
+	if got := countAction(inst.Records, "compensated"); got != compBefore {
+		t.Fatalf("同一步不得重复补偿, compensated=%d want %d", got, compBefore)
+	}
+	if countAction(inst.Records, "compensate_done") != 1 {
+		t.Fatal("补偿应补跑到终态 compensate_done")
+	}
+}
+
 func countAction(recs []model.StepRecord, action string) int {
 	n := 0
 	for _, r := range recs {
