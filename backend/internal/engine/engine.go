@@ -124,11 +124,15 @@ func (e *Engine) DeliverInput(def *model.Definition, inst *model.Instance, input
 	// A consumed key is accepted as a no-op forever: retried/duplicate
 	// submissions never advance the instance a second time.
 	if inst.ConsumedInputs[input.Key] {
-		e.addRecord(inst, inst.WaitNode, "", "duplicate_input", model.NodeEntered, "重复的输入 "+input.Key+" 已忽略")
+		e.addRecord(inst, inputContextNode(inst, input), "", "duplicate_input", model.NodeEntered, "重复的输入 "+input.Key+" 已忽略，业务动作未重复执行")
 		return nil
 	}
 	if inst.Status != model.StatusWaiting || inst.WaitNode == "" {
-		return fmt.Errorf("实例不在等待外部输入")
+		// Late input for a wait that is already gone (failed / completed) must not
+		// rerun any business action. Record it as a visible event and stay put.
+		e.addRecord(inst, inputContextNode(inst, input), "", "late_input", model.NodeEntered,
+			fmt.Sprintf("迟到的输入 %s 已忽略：实例当前状态为 %s，停在 %s", input.Key, inst.Status, effectiveStop(inst)))
+		return nil
 	}
 	if input.WaitNode != "" && input.WaitNode != inst.WaitNode {
 		return fmt.Errorf("输入目标节点 %s 与等待节点 %s 不一致", input.WaitNode, inst.WaitNode)
@@ -154,6 +158,36 @@ func (e *Engine) DeliverInput(def *model.Definition, inst *model.Instance, input
 	inst.CurrentNode = edge.To
 	e.Run(def, inst)
 	return nil
+}
+
+// inputContextNode picks the most meaningful node for an input that does not
+// advance the instance: the wait node when still waiting, otherwise the node
+// supplied by the caller or the recorded stopping/current node.
+func inputContextNode(inst *model.Instance, input model.ExternalInput) string {
+	if inst.WaitNode != "" {
+		return inst.WaitNode
+	}
+	if input.WaitNode != "" {
+		return input.WaitNode
+	}
+	return effectiveStop(inst)
+}
+
+func effectiveStop(inst *model.Instance) string {
+	if inst.StoppedAt != "" {
+		return inst.StoppedAt
+	}
+	return inst.CurrentNode
+}
+
+// Resume continues an instance that was persisted in "running" state, for
+// example after a process restart. Waiting / completed / failed instances
+// are left untouched.
+func (e *Engine) Resume(def *model.Definition, inst *model.Instance) {
+	if inst.Status != model.StatusRunning {
+		return
+	}
+	e.Run(def, inst)
 }
 
 // compensateBackward walks succeeded task nodes back along the recorded path

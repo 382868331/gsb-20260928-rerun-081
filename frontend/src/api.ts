@@ -6,8 +6,8 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
     ...init
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || "请求失败 " + res.status);
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || res.statusText || "请求失败 " + res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -21,10 +21,10 @@ export const api = {
     }),
   getDefinition: (id: string) => req<Definition>("/api/definitions/" + id),
   listInstances: () => req<Instance[]>("/api/instances"),
-  startInstance: (definitionId: string, data: Record<string, unknown>) =>
+  startInstance: (definitionId: string, data: Record<string, unknown>, name?: string) =>
     req<Instance>("/api/instances", {
       method: "POST",
-      body: JSON.stringify({ definitionId, data })
+      body: JSON.stringify({ definitionId, data, name })
     }),
   getInstance: (id: string) =>
     req<{ instance: Instance; definition: Definition }>("/api/instances/" + id),
@@ -32,5 +32,7 @@ export const api = {
     req<Instance>("/api/instances/" + id + "/inputs", {
       method: "POST",
       body: JSON.stringify({ waitNode, key, payload })
-    })
+    }),
+  resumeInstance: (id: string) =>
+    req<Instance>("/api/instances/" + id + "/resume", { method: "POST" })
 };

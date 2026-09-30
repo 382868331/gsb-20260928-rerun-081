@@ -1,16 +1,27 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Definition, FlowEdge, FlowNode } from "./types";
 import { api } from "./api";
 import { Editor } from "./components/Editor";
 import { Instances } from "./components/Instances";
+import { History } from "./components/History";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+
+type Tab = "definitions" | "instances" | "history";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "definitions", label: "流程定义" },
+  { id: "instances", label: "实例列表" },
+  { id: "history", label: "执行历史" }
+];
 
 export default function App() {
-  const [tab, setTab] = useState<"edit" | "run">("edit");
+  const [tab, setTab] = useState<Tab>("definitions");
   const [definitions, setDefinitions] = useState<Definition[]>([]);
   const [error, setError] = useState("");
 
   const loadDefs = useCallback(async () => {
     try {
+      setError("");
       setDefinitions(await api.listDefinitions());
     } catch (e) {
       setError((e as Error).message);
@@ -23,28 +34,47 @@ export default function App() {
 
   const publish = useCallback(
     async (name: string, nodes: FlowNode[], edges: FlowEdge[]): Promise<void> => {
-      const def = await api.publish(name, nodes, edges);
+      await api.publish(name, nodes, edges);
       await loadDefs();
-      setTab("run");
+      setTab("instances");
     },
     [loadDefs]
   );
 
+  const latestByName = useMemo(() => {
+    const m = new Map<string, Definition>();
+    for (const d of definitions) {
+      const cur = m.get(d.name);
+      if (!cur || d.version > cur.version) m.set(d.name, d);
+    }
+    return m;
+  }, [definitions]);
+
   return (
     <div className="app">
       <header>
-        <h1>业务流程运行平台 · 第一轮</h1>
+        <h1>业务流程运行平台</h1>
         <nav>
-          <button className={tab === "edit" ? "active" : ""} onClick={() => setTab("edit")}>流程编辑与发布</button>
-          <button className={tab === "run" ? "active" : ""} onClick={() => setTab("run")}>实例执行</button>
+          {TABS.map((t) => (
+            <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
         </nav>
-        {error && <span className="error">{error}（请确认后端已在 :8080 启动）</span>}
+        {error && <span className="error header-error">{error}（请确认后端已在 :8080 启动）</span>}
       </header>
-      {tab === "edit" ? (
-        <Editor definitions={definitions} onPublish={publish} />
-      ) : (
-        <Instances definitions={definitions} refreshKey={definitions.length} />
-      )}
+      <ErrorBoundary>
+        {tab === "definitions" && <Editor definitions={definitions} onPublish={publish} />}
+        {tab === "instances" && (
+          <Instances
+            definitions={definitions}
+            latestByName={latestByName}
+            refreshKey={definitions.length}
+            onEditedPublished={() => loadDefs()}
+          />
+        )}
+        {tab === "history" && <History definitions={definitions} />}
+      </ErrorBoundary>
     </div>
   );
 }

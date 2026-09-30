@@ -6,14 +6,16 @@ Go 流程引擎 + React 流程编辑器。第一轮交付：
 - 实例执行：实例启动时固定当时的定义 id，之后发布新版本**不影响运行中实例**
 - 条件分支：边上的条件支持 `key == "x"`、`key != ...`、`key > >= < <= 数字`、布尔键与 `default`
 - 等待外部输入：执行到 wait 节点挂起；页面人工提交，带**幂等键 key**，同一 key 重复提交只生效一次
+- 迟到输入：实例已离开等待点（失败/完成）后再提交输入不再整体报错；记录 `late_input` 事件并忽略，不覆盖数据、不重做动作
 - 失败补偿：任务失败后按执行路径逆序调用补偿；补偿本身也可能失败，实例记录**真实停在哪一步**（`stoppedAt`）
-- 持久化与重启续跑：定义和实例均以 JSON 原子写盘（临时文件 + rename），重启进程后同一实例继续推进
-- 页面中的绿色箭头只来自执行记录 `records` 里真实经过的 `edgeId`（branch/traverse），不是动画推断
+- 持久化与重启续跑：定义和实例均以 JSON 原子写盘（临时文件 + rename）；服务启动时自动恢复 `running` 状态实例，也可 `POST /api/instances/{id}/resume` 手动续跑
+- 页面三个页签：**流程定义**（载入旧版本修改后同名发布新版本）、**实例列表**（按流程最新版本启动、显示停点/等待点、已生效 key）、**执行历史**（按状态筛选、逐条事件、已生效动作与补偿统计）
+- 画布中的绿色箭头只来自执行记录 `records` 里真实经过的 `edgeId`（branch/traverse），不是动画推断；前端带错误边界，局部渲染异常不再整页白屏
 
 ## 目录
 
 - `backend/` Go 服务：`model`（定义/实例/执行记录）、`engine`（执行/条件/补偿）、`store`（JSON 持久化）、`api`（HTTP）
-- `frontend/` React 19 + @xyflow/react：编辑发布页、实例执行页
+- `frontend/` React 19 + @xyflow/react：流程定义页、实例列表页、执行历史页
 
 ## 运行
 
@@ -47,6 +49,9 @@ cd ../backend && go run ./cmd/server -static ../frontend/dist
 - `POST /api/instances` 启动 `{definitionId, data}`（运行到等待/结束/失败后落盘）
 - `GET  /api/instances` / `GET /api/instances/{id}`（返回实例 + 其固定版本定义）
 - `POST /api/instances/{id}/inputs` 人工输入 `{waitNode, key, payload}`
+- `POST /api/instances/{id}/resume` 重启后把 `running` 实例推进到下一个等待/结束/失败
+
+重复与迟到输入的返回均为 200：是否生效看实例事件流中的 `input_received` / `duplicate_input` / `late_input`，业务动作永远不会因为重试而执行第二次。
 
 ## 失败与补偿的页面模拟
 

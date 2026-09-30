@@ -112,7 +112,11 @@ func (s *Server) startInstance(w http.ResponseWriter, r *http.Request) {
 	if req.DefinitionID != "" {
 		def, err = s.store.GetDefinition(req.DefinitionID)
 	} else {
-		def, err = s.store.LatestDefinition(req.Name)
+		name := req.Name
+		if name == "" {
+			name = "order-demo"
+		}
+		def, err = s.store.LatestDefinition(name)
 	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -130,6 +134,25 @@ func (s *Server) startInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, inst)
+}
+
+func (s *Server) resumeInstance(w http.ResponseWriter, r *http.Request, id string) {
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.engine.Resume(def, inst)
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
 }
 
 func (s *Server) listInstances(w http.ResponseWriter, r *http.Request) {
@@ -162,6 +185,10 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[1] == "inputs" && r.Method == http.MethodPost {
 		s.deliverInput(w, r, id)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "resume" && r.Method == http.MethodPost {
+		s.resumeInstance(w, r, id)
 		return
 	}
 	writeErr(w, http.StatusNotFound, errMissing("route"))

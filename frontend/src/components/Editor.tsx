@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { ReactFlow, ReactFlowProvider, useEdgesState, useNodesState } from "@xyflow/react";
+import { useMemo, useState } from "react";
+import { ReactFlow, ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Definition, FlowNode, NodeType } from "../types";
 import { templateEdges, templateNodes } from "../template";
@@ -25,29 +25,24 @@ export function Editor({ definitions, onPublish }: Props) {
   const [error, setError] = useState("");
 
   const flow = useMemo(() => definitionToFlow({ nodes, edges }), [nodes, edges]);
-  const [rfNodes, , onNodesChange] = useNodesState(flow.nodes);
-  const [rfEdges, , onEdgesChange] = useEdgesState(flow.edges);
-
-  // keep rf nodes/edges in sync after edits
-  useEffect(() => {
-    rfNodes.splice(0, rfNodes.length, ...flow.nodes);
-    rfEdges.splice(0, rfEdges.length, ...flow.edges);
-  }, [flow]);
-
   const selectedNode = nodes.find((n) => n.id === selected) || null;
 
   function addNode(type: NodeType) {
     const id = type + "_" + counter++;
-    setNodes((prev) => [
-      ...prev,
-      { id, type, name: TYPE_LABEL[type] + counter, x: 300 + (counter % 5) * 40, y: 300 + (counter % 4) * 40 }
-    ]);
+    const n: FlowNode = {
+      id,
+      type,
+      name: TYPE_LABEL[type] + counter,
+      x: 300 + (counter % 5) * 40,
+      y: 300 + (counter % 4) * 40
+    };
+    setNodes((prev) => [...prev, n]);
     setSelected(id);
   }
 
   function updateNode(patch: Partial<FlowNode>) {
     if (!selectedNode) return;
-    setNodes(nodes.map((n) => (n.id === selectedNode.id ? { ...n, ...patch } : n)));
+    setNodes((prev) => prev.map((n) => (n.id === selectedNode.id ? { ...n, ...patch } : n)));
   }
 
   function addEdge() {
@@ -55,13 +50,28 @@ export function Editor({ definitions, onPublish }: Props) {
       setError("请选择不同的起点和终点");
       return;
     }
+    if (edges.some((e) => e.from === from && e.to === to)) {
+      setError("这条连接已经存在");
+      return;
+    }
     const id = "e_" + from + "_" + to + "_" + counter++;
     setEdges((prev) => [...prev, { id, from, to, condition: condition || undefined, label: edgeLabel || undefined }]);
     setError("");
   }
 
-  function deleteEdge(id: string) {
-    setEdges(edges.filter((e) => e.id !== id));
+  function loadVersion(d: Definition) {
+    setName(d.name);
+    setNodes(d.nodes.map((n) => ({ ...n })));
+    setEdges(d.edges.map((e) => ({ ...e })));
+    setSelected(d.nodes[0]?.id ?? null);
+    setError("");
+  }
+
+  function resetTemplate() {
+    setNodes(templateNodes.map((n) => ({ ...n })));
+    setEdges(templateEdges.map((e) => ({ ...e })));
+    setName("order-demo");
+    setSelected("check");
   }
 
   async function publish() {
@@ -79,9 +89,9 @@ export function Editor({ definitions, onPublish }: Props) {
   return (
     <div className="editor-layout">
       <aside className="panel">
-        <h2>流程编辑</h2>
+        <h2>流程定义编辑</h2>
         <label>
-          流程名称
+          流程名称（同名发布会生成新版本）
           <input value={name} onChange={(e) => setName(e.target.value)} />
         </label>
         <div className="btn-row">
@@ -116,7 +126,7 @@ export function Editor({ definitions, onPublish }: Props) {
             {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}({n.id})</option>)}
           </select>
         </label>
-        <label>条件（如 amount &gt;= 100，留空/default 为默认）
+        <label>条件（如 amount &gt;= 100；留空或 default 为默认分支）
           <input value={condition} onChange={(e) => setCondition(e.target.value)} placeholder="amount >= 100" />
         </label>
         <label>边上显示文字<input value={edgeLabel} onChange={(e) => setEdgeLabel(e.target.value)} /></label>
@@ -125,24 +135,22 @@ export function Editor({ definitions, onPublish }: Props) {
         <ul className="edge-list">
           {edges.map((e) => (
             <li key={e.id}>{e.from} → {e.to} {e.condition ? <b>当 {e.condition}</b> : null}
-              <button className="link-danger" onClick={() => deleteEdge(e.id)}>删除</button>
+              <button className="link-danger" onClick={() => setEdges((prev) => prev.filter((x) => x.id !== e.id))}>删除</button>
             </li>
           ))}
         </ul>
 
         <button className="primary" disabled={busy} onClick={publish}>{busy ? "发布中…" : "发布为新版本（不可变）"}</button>
+        <button onClick={resetTemplate} style={{ marginTop: 6 }}>重置为示例模板</button>
         {error && <div className="error">{error}</div>}
       </aside>
 
       <div className="canvas">
         <ReactFlowProvider>
           <ReactFlow
-            nodes={rfNodes}
-            edges={rfEdges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
+            nodes={flow.nodes}
+            edges={flow.edges}
             onNodeClick={(_, n) => setSelected(n.id)}
-            nodesDraggable
             fitView
             proOptions={{ hideAttribution: true }}
           />
@@ -150,12 +158,15 @@ export function Editor({ definitions, onPublish }: Props) {
       </div>
 
       <aside className="panel versions">
-        <h2>已发布版本</h2>
-        <p className="hint">发布不会修改运行中实例固定的旧定义。</p>
-        {definitions.map((d) => (
+        <h2>已发布定义（{definitions.length}）</h2>
+        <p className="hint">点开版本可载入画布修改，再以同名发布新版本；已有实例继续固定启动时版本。</p>
+        {definitions.length === 0 && <p className="hint">还没有已发布定义，先发布当前模板。</p>}
+        {[...definitions].reverse().map((d) => (
           <div key={d.id} className="version-card">
             <strong>{d.name}</strong> <span className="badge">v{d.version}</span>
             <div className="hint">{d.id}</div>
+            <div className="hint">节点 {d.nodes.length} · 边 {d.edges.length}</div>
+            <button onClick={() => loadVersion(d)}>载入到画布修改</button>
           </div>
         ))}
       </aside>

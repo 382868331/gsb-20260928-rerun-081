@@ -151,3 +151,107 @@ func TestHTTPFailedCompensationStopPoint(t *testing.T) {
 		t.Fatalf("补偿失败停点应为 t1, got status=%s stop=%s", inst.Status, inst.StoppedAt)
 	}
 }
+
+func TestHTTPLateInputIsRecordedNotRejected(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data3")
+	h, _ := setup(t, dir)
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "w", Type: model.NodeWait, Name: "人工"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{
+		{ID: "a", From: "s", To: "w"},
+		{ID: "b", From: "w", To: "e"},
+	}
+	var def model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes, "edges": edges}, &def)
+	var inst model.Instance
+	do(t, h, "POST", "/api/instances", map[string]any{"definitionId": def.ID, "data": map[string]any{}}, &inst)
+
+	var completed model.Instance
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{
+		"waitNode": "w", "key": "k1", "payload": map[string]any{"x": 1},
+	}, &completed)
+	if completed.Status != model.StatusCompleted {
+		t.Fatalf("first input should complete, got %s", completed.Status)
+	}
+
+	// A NEW key arriving late must NOT be a 400 and must NOT rerun anything.
+	var late model.Instance
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{
+		"waitNode": "w", "key": "late-key", "payload": map[string]any{"x": 999},
+	}, &late); code != 200 {
+		t.Fatalf("late input should be accepted/ignored, code=%d", code)
+	}
+	if late.Status != model.StatusCompleted || late.CurrentNode != "e" {
+		t.Fatalf("late input must not change state: %s/%s", late.Status, late.CurrentNode)
+	}
+	if _, ok := late.ConsumedInputs["late-key"]; ok {
+		t.Fatal("late input must not be marked consumed")
+	}
+	if late.Data["x"] != float64(1) {
+		t.Fatalf("late payload must not overwrite data: %v", late.Data["x"])
+	}
+	hasLate := false
+	hasProgress := 0
+	for _, r := range late.Records {
+		if r.Action == "late_input" && r.NodeID == "w" {
+			hasLate = true
+		}
+		if r.Action == "traverse" {
+			hasProgress++
+		}
+	}
+	if !hasLate || hasProgress != 2 {
+		t.Fatalf("expected one late_input event and no new traverses beyond the two initial, got late=%v traverse=%d", hasLate, hasProgress)
+	}
+}
+
+func TestHTTPResumeRunningInstance(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data4")
+	h, st := setup(t, dir)
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "t1", Type: model.NodeTask, Name: "任务1"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{{ID: "a", From: "s", To: "t1"}, {ID: "b", From: "t1", To: "e"}}
+	var def model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes, "edges": edges}, &def)
+
+	// Simulate an instance persisted mid-flight in running state (crash before reaching wait/end).
+	inst, err := st.CreateInstance(&def, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.CurrentNode = "t1"
+	if err := st.SaveInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	var resumed model.Instance
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/resume", nil, &resumed); code != 200 {
+		t.Fatalf("resume code=%d", code)
+	}
+	if resumed.Status != model.StatusCompleted || resumed.StoppedAt != "e" {
+		t.Fatalf("resume should reach end, got %s/%s", resumed.Status, resumed.StoppedAt)
+	}
+}
+
+func TestHTTPStartLatestByName(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data5")
+	h, _ := setup(t, dir)
+	nodesV1 := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	var v1 model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "order-demo", "nodes": nodesV1, "edges": []model.Edge{{ID: "a", From: "s", To: "e"}}}, &v1)
+	var inst model.Instance
+	if code := do(t, h, "POST", "/api/instances", map[string]any{"data": map[string]any{}}, &inst); code != 201 {
+		t.Fatalf("start without definitionId should resolve latest order-demo, code=%d", code)
+	}
+	if inst.DefinitionID != v1.ID {
+		t.Fatalf("expected pinned v1, got %s", inst.DefinitionID)
+	}
+}

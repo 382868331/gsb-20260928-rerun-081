@@ -44,6 +44,7 @@ func main() {
 		return nil
 	}
 	eng := engine.New(taskHandler, compHandler)
+	recoverRunning(st, eng)
 	handler := api.NewHandler(st, eng)
 
 	mux := http.NewServeMux()
@@ -55,6 +56,33 @@ func main() {
 
 	log.Printf("流程平台已启动: %s (数据目录 %s)", *addr, *dataDir)
 	log.Fatal(http.ListenAndServe(*addr, mux))
+}
+
+// recoverRunning pushes any instance left in "running" status by a previous
+// crash/restart forward to its next wait/completion/failure and persists it.
+func recoverRunning(st *store.Store, eng *engine.Engine) {
+	list, err := st.ListInstances()
+	if err != nil {
+		log.Printf("重启恢复: 读取实例失败: %v", err)
+		return
+	}
+	for i := range list {
+		inst := &list[i]
+		if inst.Status != model.StatusRunning {
+			continue
+		}
+		def, err := st.GetDefinition(inst.DefinitionID)
+		if err != nil {
+			log.Printf("重启恢复: 实例 %s 的定义缺失: %v", inst.ID, err)
+			continue
+		}
+		eng.Resume(def, inst)
+		if err := st.SaveInstance(inst); err != nil {
+			log.Printf("重启恢复: 保存实例 %s 失败: %v", inst.ID, err)
+			continue
+		}
+		log.Printf("重启恢复: 实例 %s 推进至 %s (停点 %s)", inst.ID, inst.Status, inst.StoppedAt)
+	}
 }
 
 // spaHandler serves index.html for unknown non-API routes (React Router-less SPA fallback).
