@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { ReactFlow, ReactFlowProvider, useEdgesState, useNodesState } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Definition, FlowNode, NodeType } from "../types";
+import { NODE_TYPE_LABEL } from "../types";
 import { templateEdges, templateNodes } from "../template";
-import { TYPE_LABEL, definitionToFlow, nodeColor } from "../flowView";
+import { definitionToFlow, nodeColor } from "../flowView";
 
 interface Props {
   definitions: Definition[];
-  onPublish: (name: string, nodes: FlowNode[], edges: typeof templateEdges) => Promise<void>;
+  onPublish: (name: string, nodes: FlowNode[], edges: typeof templateEdges) => Promise<unknown>;
 }
 
 let counter = 100;
@@ -25,14 +26,17 @@ export function Editor({ definitions, onPublish }: Props) {
   const [error, setError] = useState("");
 
   const flow = useMemo(() => definitionToFlow({ nodes, edges }), [nodes, edges]);
-  const [rfNodes, , onNodesChange] = useNodesState(flow.nodes);
-  const [rfEdges, , onEdgesChange] = useEdgesState(flow.edges);
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState(flow.nodes);
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState(flow.edges);
 
-  // keep rf nodes/edges in sync after edits
+  // Sync derived React Flow elements through the proper state setter instead of
+  // mutating the returned array in place.
   useEffect(() => {
-    rfNodes.splice(0, rfNodes.length, ...flow.nodes);
-    rfEdges.splice(0, rfEdges.length, ...flow.edges);
-  }, [flow]);
+    setRfNodes(flow.nodes);
+  }, [flow.nodes, setRfNodes]);
+  useEffect(() => {
+    setRfEdges(flow.edges);
+  }, [flow.edges, setRfEdges]);
 
   const selectedNode = nodes.find((n) => n.id === selected) || null;
 
@@ -40,14 +44,20 @@ export function Editor({ definitions, onPublish }: Props) {
     const id = type + "_" + counter++;
     setNodes((prev) => [
       ...prev,
-      { id, type, name: TYPE_LABEL[type] + counter, x: 300 + (counter % 5) * 40, y: 300 + (counter % 4) * 40 }
+      { id, type, name: NODE_TYPE_LABEL[type] + counter, x: 300 + (counter % 5) * 40, y: 300 + (counter % 4) * 40 }
     ]);
     setSelected(id);
   }
 
   function updateNode(patch: Partial<FlowNode>) {
     if (!selectedNode) return;
-    setNodes(nodes.map((n) => (n.id === selectedNode.id ? { ...n, ...patch } : n)));
+    setNodes((prev) => prev.map((n) => (n.id === selectedNode.id ? { ...n, ...patch } : n)));
+  }
+
+  function deleteNode(id: string) {
+    setNodes((prev) => prev.filter((n) => n.id !== id));
+    setEdges((prev) => prev.filter((e) => e.from !== id && e.to !== id));
+    if (selected === id) setSelected(null);
   }
 
   function addEdge() {
@@ -56,19 +66,21 @@ export function Editor({ definitions, onPublish }: Props) {
       return;
     }
     const id = "e_" + from + "_" + to + "_" + counter++;
-    setEdges((prev) => [...prev, { id, from, to, condition: condition || undefined, label: edgeLabel || undefined }]);
+    setEdges((prev) => [...prev, { id, from, to, condition: condition.trim() || undefined, label: edgeLabel.trim() || undefined }]);
+    setCondition("");
+    setEdgeLabel("");
     setError("");
   }
 
   function deleteEdge(id: string) {
-    setEdges(edges.filter((e) => e.id !== id));
+    setEdges((prev) => prev.filter((e) => e.id !== id));
   }
 
   async function publish() {
     setBusy(true);
     setError("");
     try {
-      await onPublish(name, nodes, edges);
+      await onPublish(name.trim(), nodes, edges);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -79,7 +91,8 @@ export function Editor({ definitions, onPublish }: Props) {
   return (
     <div className="editor-layout">
       <aside className="panel">
-        <h2>流程编辑</h2>
+        <h2>流程编辑（新版本草稿）</h2>
+        <p className="hint">在此修改只影响之后发布并启动的实例；已经在运行的实例继续遵守启动时固定的版本。</p>
         <label>
           流程名称
           <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -96,12 +109,18 @@ export function Editor({ definitions, onPublish }: Props) {
             <h3>节点属性（{selectedNode.id}）</h3>
             <label>名称<input value={selectedNode.name} onChange={(e) => updateNode({ name: e.target.value })} /></label>
             <label>补偿目标节点
-              <select value={selectedNode.compensateTo || ""} onChange={(e) => updateNode({ compensateTo: e.target.value || undefined })}>
+              <select
+                value={selectedNode.compensateTo || ""}
+                onChange={(e) => updateNode({ compensateTo: e.target.value || undefined })}
+              >
                 <option value="">（失败时无需补偿）</option>
                 {nodes.filter((n) => n.type === "task").map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
               </select>
             </label>
-            <span className="hint" style={{ color: nodeColor(selectedNode.type) }}>类型：{TYPE_LABEL[selectedNode.type]}</span>
+            <div className="node-prop-row">
+              <span className="hint" style={{ color: nodeColor(selectedNode.type) }}>类型：{NODE_TYPE_LABEL[selectedNode.type]}</span>
+              <button className="link-danger" onClick={() => deleteNode(selectedNode.id)}>删除节点</button>
+            </div>
           </div>
         )}
 
@@ -116,7 +135,7 @@ export function Editor({ definitions, onPublish }: Props) {
             {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}({n.id})</option>)}
           </select>
         </label>
-        <label>条件（如 amount &gt;= 100，留空/default 为默认）
+        <label>条件（如 amount &gt;= 100；留空或 default 为默认分支）
           <input value={condition} onChange={(e) => setCondition(e.target.value)} placeholder="amount >= 100" />
         </label>
         <label>边上显示文字<input value={edgeLabel} onChange={(e) => setEdgeLabel(e.target.value)} /></label>
@@ -130,7 +149,9 @@ export function Editor({ definitions, onPublish }: Props) {
           ))}
         </ul>
 
-        <button className="primary" disabled={busy} onClick={publish}>{busy ? "发布中…" : "发布为新版本（不可变）"}</button>
+        <button className="primary" disabled={busy || !name.trim()} onClick={publish}>
+          {busy ? "发布中…" : "发布为不可变新版本"}
+        </button>
         {error && <div className="error">{error}</div>}
       </aside>
 
@@ -150,14 +171,16 @@ export function Editor({ definitions, onPublish }: Props) {
       </div>
 
       <aside className="panel versions">
-        <h2>已发布版本</h2>
-        <p className="hint">发布不会修改运行中实例固定的旧定义。</p>
+        <h2>已发布版本（{definitions.length}）</h2>
+        <p className="hint">每次发布生成不可变新版本；运行中实例固定旧定义。</p>
         {definitions.map((d) => (
           <div key={d.id} className="version-card">
             <strong>{d.name}</strong> <span className="badge">v{d.version}</span>
             <div className="hint">{d.id}</div>
+            <div className="hint">节点 {d.nodes.length} · 边 {d.edges.length} · {new Date(d.publishedAt).toLocaleString("zh-CN")}</div>
           </div>
         ))}
+        {definitions.length === 0 && <p className="hint">还没有发布过版本。</p>}
       </aside>
     </div>
   );

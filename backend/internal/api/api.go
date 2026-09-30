@@ -164,7 +164,34 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.deliverInput(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "resume" && r.Method == http.MethodPost {
+		s.resumeInstance(w, r, id)
+		return
+	}
 	writeErr(w, http.StatusNotFound, errMissing("route"))
+}
+
+// resumeInstance continues an instance left in "running" state by a process
+// crash/restart. Waiting/completed/failed instances are returned unchanged.
+func (s *Server) resumeInstance(w http.ResponseWriter, r *http.Request, id string) {
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if inst.Status == model.StatusRunning {
+		s.engine.Run(def, inst)
+		if err := s.store.SaveInstance(inst); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, inst)
 }
 
 func (s *Server) deliverInput(w http.ResponseWriter, r *http.Request, id string) {

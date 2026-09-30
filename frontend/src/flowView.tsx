@@ -1,13 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { Definition, FlowNode, StepRecord } from "./types";
-
-export const TYPE_LABEL: Record<string, string> = {
-  start: "开始",
-  task: "自动任务",
-  decision: "条件分支",
-  wait: "等待人工输入",
-  end: "结束"
-};
+import { NODE_TYPE_LABEL } from "./types";
 
 const TYPE_COLOR: Record<string, string> = {
   start: "#16a34a",
@@ -28,7 +21,7 @@ export function definitionToFlow(def: Pick<Definition, "nodes" | "edges">): {
   const nodes: Node[] = def.nodes.map((n) => ({
     id: n.id,
     position: { x: n.x, y: n.y },
-    data: { label: n.name + "\n[" + TYPE_LABEL[n.type] + "]" },
+    data: { label: n.name + "\n[" + NODE_TYPE_LABEL[n.type] + "]" },
     draggable: false,
     selectable: false,
     style: {
@@ -63,16 +56,19 @@ export function applyExecution(
   stoppedAt?: string
 ): { nodes: Node[]; edges: Edge[] } {
   const traversedEdges = new Set<string>();
-  const nodeState = new Map<string, { failed: boolean; waiting: boolean; compensated: boolean; compFailed: boolean }>();
+  const nodeState = new Map<string, { failed: boolean; waiting: boolean; compensated: boolean; compFailed: boolean; visited: boolean }>();
 
   for (const rec of records) {
     if (rec.edgeId) traversedEdges.add(rec.edgeId);
-    const st = nodeState.get(rec.nodeId) || { failed: false, waiting: false, compensated: false, compFailed: false };
+    const st = nodeState.get(rec.nodeId) || { failed: false, waiting: false, compensated: false, compFailed: false, visited: false };
+    if (rec.action !== "duplicate_input") st.visited = true;
     if (rec.action === "fail") st.failed = true;
     if (rec.action === "compensated") { st.compensated = true; st.failed = false; }
     if (rec.action === "compensation_fail") { st.compFailed = true; st.failed = true; }
     if (rec.action === "wait") st.waiting = true;
-    if (rec.action === "input_received" || rec.action === "succeed" || rec.action === "complete") st.waiting = false;
+    if (rec.action === "input_received" || rec.action === "succeed" || rec.action === "complete" || rec.action === "traverse") st.waiting = false;
+    // A late duplicate input must not change node state at all.
+    if (rec.action === "duplicate_input") continue;
     nodeState.set(rec.nodeId, st);
   }
 
@@ -100,7 +96,7 @@ export function applyExecution(
       updated.style = { ...updated.style, background: "#ede9fe", border: "3px solid #7c3aed" };
     } else if (st?.compensated) {
       updated.style = { ...updated.style, background: "#ffedd5", border: "2px dashed #ea580c" };
-    } else if (st) {
+    } else if (st?.visited) {
       updated.style = { ...updated.style, background: "#dcfce7", border: "2px solid #16a34a" };
     }
     if (stoppedAt === n.id) {

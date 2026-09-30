@@ -151,3 +151,47 @@ func TestHTTPFailedCompensationStopPoint(t *testing.T) {
 		t.Fatalf("补偿失败停点应为 t1, got status=%s stop=%s", inst.Status, inst.StoppedAt)
 	}
 }
+
+func TestHTTPResumeRunningInstanceAfterRestart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data-resume")
+	h, st := setup(t, dir)
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{{ID: "a", From: "s", To: "e"}}
+	var def model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes, "edges": edges}, &def)
+	var inst model.Instance
+	do(t, h, "POST", "/api/instances", map[string]any{"definitionId": def.ID, "data": map[string]any{}},
+		&inst)
+	if inst.Status != model.StatusCompleted {
+		t.Fatalf("start-to-end 实例应完成, got %s", inst.Status)
+	}
+
+	// Fabricate a "running" instance on disk, as if the process crashed mid-run.
+	inst.Status = model.StatusRunning
+	inst.CurrentNode = "s"
+	inst.Records = nil
+	inst.StoppedAt = ""
+	if err := st.SaveInstance(&inst); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart = fresh handler over the same directory, then resume.
+	h2, _ := setup(t, dir)
+	var resumed model.Instance
+	if code := do(t, h2, "POST", "/api/instances/"+inst.ID+"/resume", nil, &resumed); code != 200 {
+		t.Fatalf("resume code=%d", code)
+	}
+	if resumed.Status != model.StatusCompleted || resumed.StoppedAt != "e" {
+		t.Fatalf("resume 应推进到结束, got status=%s stop=%s", resumed.Status, resumed.StoppedAt)
+	}
+
+	// Resuming a completed instance is a safe no-op.
+	var again model.Instance
+	do(t, h2, "POST", "/api/instances/"+inst.ID+"/resume", nil, &again)
+	if again.Status != model.StatusCompleted {
+		t.Fatalf("已完成实例 resume 必须是 no-op, got %s", again.Status)
+	}
+}

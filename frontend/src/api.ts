@@ -32,5 +32,7 @@ export const api = {
     req<Instance>("/api/instances/" + id + "/inputs", {
       method: "POST",
       body: JSON.stringify({ waitNode, key, payload })
-    })
+    }),
+  resume: (id: string) =>
+    req<Instance>("/api/instances/" + id + "/resume", { method: "POST" })
 };
