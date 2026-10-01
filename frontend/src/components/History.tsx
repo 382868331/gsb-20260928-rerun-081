@@ -9,15 +9,18 @@ export function History({ definitions }: { definitions: Definition[] }) {
   const [detail, setDetail] = useState<{ instance: Instance; definition: Definition } | null>(null);
   const [filter, setFilter] = useState("all");
   const [error, setError] = useState("");
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
 
   const load = useCallback(async () => {
+    setStatus("loading");
     const list = await api.listInstances();
     setInstances(list);
+    setStatus("ready");
     if (!selectedId && list[0]) setSelectedId(list[0].id);
   }, [selectedId]);
 
   useEffect(() => {
-    load().catch((e) => setError((e as Error).message));
+    load().catch((e) => { setError((e as Error).message); setStatus("error"); });
   }, [load]);
 
   useEffect(() => {
@@ -60,6 +63,13 @@ export function History({ definitions }: { definitions: Definition[] }) {
           </select>
         </label>
         {error && <div className="error">{error}</div>}
+        {status === "loading" && <div className="state-loading">正在加载实例…</div>}
+        {status === "error" && (
+          <div className="state-error">
+            <div className="error">加载失败：{error}</div>
+            <button onClick={() => { setError(""); load().catch((e) => { setError((e as Error).message); setStatus("error"); }); }}>重新加载</button>
+          </div>
+        )}
         <ul className="instance-list">
           {filtered.map((i) => {
             const d = defOf(i.definitionId);
@@ -72,7 +82,7 @@ export function History({ definitions }: { definitions: Definition[] }) {
               </li>
             );
           })}
-          {filtered.length === 0 && <li className="hint">没有匹配的实例。</li>}
+          {status === "ready" && filtered.length === 0 && <li className="state-empty">没有匹配的实例{filter !== "all" ? "（可切换状态筛选）" : "，先到实例列表启动一个"}。</li>}
         </ul>
       </aside>
 
@@ -89,6 +99,12 @@ export function History({ definitions }: { definitions: Definition[] }) {
               <div><span className="hint">被忽略的重复/迟到输入</span><b>{ignoredInputs} 次</b></div>
               <div><span className="hint">固定定义</span><b className="mono">{inst.definitionId}</b></div>
               <div><span className="hint">实例</span><b className="mono">{inst.id}</b></div>
+              {inst.definitionHistory && inst.definitionHistory.length > 1 && (
+                <div>
+                  <span className="hint">定义版本轨迹</span>
+                  <b>{inst.definitionHistory.map((h) => h.name + " v" + h.version).join(" → ")}</b>
+                </div>
+              )}
             </div>
             <h3>事件流（全部来自后端真实记录）</h3>
             <RecordList records={inst.records} nodeName={nodeName} />

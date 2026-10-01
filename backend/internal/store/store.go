@@ -19,8 +19,35 @@ import (
 // Each write is atomic (temp file + rename) so a restart always sees
 // a consistent state. Definitions are append-only/immutable.
 type Store struct {
-	root string
-	mu   sync.Mutex
+	root       string
+	mu         sync.Mutex
+	instanceMu sync.Map // instance id -> *sync.Mutex
+}
+
+// LockInstance serializes all read-modify-write operations on one instance,
+// so a duplicate input arriving concurrently (double click / retry) cannot
+// complete the same wait step twice.
+func (s *Store) LockInstance(id string) func() {
+	m, _ := s.instanceMu.LoadOrStore(id, &sync.Mutex{})
+	m.(*sync.Mutex).Lock()
+	return func() { m.(*sync.Mutex).Unlock() }
+}
+
+// LatestDefinitionsByName returns the newest published version of each name.
+func (s *Store) LatestDefinitionsByName() (map[string]model.Definition, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defs, err := s.listDefsLocked()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]model.Definition{}
+	for _, d := range defs {
+		if cur, ok := out[d.Name]; !ok || d.Version > cur.Version {
+			out[d.Name] = d
+		}
+	}
+	return out, nil
 }
 
 func New(root string) (*Store, error) {
@@ -162,8 +189,14 @@ func (s *Store) CreateInstance(def *model.Definition, data map[string]any) (*mod
 		CurrentNode:    start,
 		ConsumedInputs: map[string]bool{},
 		Records:        nil,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		DefinitionHistory: []model.DefinitionRef{{
+			DefinitionID: def.ID,
+			Name:         def.Name,
+			Version:      def.Version,
+			Since:        now,
+		}},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if inst.Data == nil {
 		inst.Data = map[string]any{}

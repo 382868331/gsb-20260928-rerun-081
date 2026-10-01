@@ -255,3 +255,96 @@ func TestHTTPStartLatestByName(t *testing.T) {
 		t.Fatalf("expected pinned v1, got %s", inst.DefinitionID)
 	}
 }
+
+func TestHTTPWaitingMigrationPreviewAndConfirm(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data6")
+	h, _ := setup(t, dir)
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "w", Type: model.NodeWait, Name: "人工"},
+		{ID: "t", Type: model.NodeTask, Name: "任务"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{
+		{ID: "a", From: "s", To: "w"},
+		{ID: "b", From: "w", To: "t"},
+		{ID: "c", From: "t", To: "e"},
+	}
+	var v1 model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes, "edges": edges}, &v1)
+	var inst model.Instance
+	do(t, h, "POST", "/api/instances", map[string]any{"definitionId": v1.ID, "data": map[string]any{}}, &inst)
+	if inst.Status != model.StatusWaiting {
+		t.Fatalf("应等待, got %s", inst.Status)
+	}
+
+	// v2 adds a new task after the wait node.
+	v2Nodes := append(append([]model.Node{}, nodes...), model.Node{ID: "t2", Type: model.NodeTask, Name: "新任务"})
+	v2Edges := []model.Edge{
+		{ID: "a", From: "s", To: "w"},
+		{ID: "d", From: "w", To: "t2"},
+		{ID: "e2", From: "t2", To: "t"},
+		{ID: "c", From: "t", To: "e"},
+	}
+	var v2 model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": v2Nodes, "edges": v2Edges}, &v2)
+
+	// Preview without confirm flag is allowed via GET and reports t2 ahead.
+	req := httptest.NewRequest("GET", "/api/instances/"+inst.ID+"/migration?definitionId="+v2.ID, nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("preview code=%d body=%s", w.Code, w.Body.String())
+	}
+	var preview struct {
+		Impact struct {
+			Affected []struct {
+				NodeID string `json:"nodeId"`
+			} `json:"affectedAhead"`
+		} `json:"impact"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	hit := false
+	for _, a := range preview.Impact.Affected {
+		if a.NodeID == "t2" {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatalf("预览应列出等待点之后新增的 t2: %s", w.Body.String())
+	}
+
+	// Confirm without flag must be rejected.
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/migration", map[string]any{"definitionId": v2.ID}, nil); code != 400 {
+		t.Fatalf("未确认迁移应被拒绝, code=%d", code)
+	}
+
+	var migrated struct {
+		Instance model.Instance `json:"instance"`
+	}
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/migration", map[string]any{"definitionId": v2.ID, "confirm": true}, &migrated); code != 200 {
+		t.Fatalf("confirm code=%d", code)
+	}
+	if migrated.Instance.DefinitionID != v2.ID || migrated.Instance.Version != 2 {
+		t.Fatalf("迁移后应固定 v2, got %s v%d", migrated.Instance.DefinitionID, migrated.Instance.Version)
+	}
+
+	// Delivering input now runs under v2: both t2 and t run once, completes.
+	var done model.Instance
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{"key": "k1", "payload": map[string]any{}},
+		&done)
+	if done.Status != model.StatusCompleted {
+		t.Fatalf("迁移后应按新版本完成, got %s", done.Status)
+	}
+	counts := map[string]int{}
+	for _, r := range done.Records {
+		if r.Action == "succeed" {
+			counts[r.NodeID]++
+		}
+	}
+	if counts["t"] != 1 || counts["t2"] != 1 {
+		t.Fatalf("新旧版本步骤各只能执行一次: %v", counts)
+	}
+}

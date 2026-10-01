@@ -78,6 +78,28 @@ button.primary { background: #2563eb; color: #fff; border-color: #2563eb; width:
 .waiting-tag { color: #5b21b6; font-weight: 600; }
 .arrow-note { position: absolute; bottom: 8px; left: 12px; z-index: 5; background: rgba(255,255,255,.9); padding: 2px 8px; border-radius: 6px; }
 .empty { display: flex; align-items: center; justify-content: center; height: 100%; color: #94a3b8; }
+.state-loading { color: #64748b; font-size: 12px; padding: 10px 4px; }
+.state-error { padding: 8px; border: 1px dashed #fca5a5; border-radius: 8px; background: #fef2f2; }
+.state-error .error { margin-bottom: 6px; }
+.state-empty { padding: 10px 4px; color: #64748b; font-size: 12px; }
+.block-state { border: 1px dashed #cbd5e1; border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #f8fafc; }
+.state-error-col { flex-direction: column; gap: 8px; }
+.compensating-tag { color: #b45309; font-weight: 600; }
+.execution-fail-banner {
+  position: absolute; left: 10px; bottom: 34px; z-index: 5; max-width: 70%;
+  background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b;
+  border-radius: 8px; padding: 8px 12px; font-size: 12px;
+}
+.migration-section { border-top: 1px solid #e2e8f0; margin-top: 12px; padding-top: 8px; }
+.migration-preview { border: 1px solid #c4b5fd; background: #f5f3ff; border-radius: 8px; padding: 8px; margin-top: 8px; }
+.impact-list { list-style: none; margin: 6px 0; padding: 0; font-size: 12px; }
+.impact-list li { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+.impact-kind { border-radius: 999px; padding: 1px 8px; font-size: 11px; white-space: nowrap; }
+.impact-added, .impact-edge_added { background: #dcfce7; color: #166534; }
+.impact-removed { background: #fee2e2; color: #991b1b; }
+.impact-changed, .impact-edge_changed { background: #fef9c3; color: #854d0e; }
+button.danger-confirm { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+.record-definition_migrated { border-left: 3px solid #7c3aed; padding-left: 6px; }
 
 .records { max-height: 50vh; overflow: auto; }
 .record {

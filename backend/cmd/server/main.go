@@ -44,6 +44,7 @@ func main() {
 		return nil
 	}
 	eng := engine.New(taskHandler, compHandler)
+	eng.WithPersist(func(inst *model.Instance) { _ = st.SaveInstance(inst) })
 	recoverRunning(st, eng)
 	handler := api.NewHandler(st, eng)
 

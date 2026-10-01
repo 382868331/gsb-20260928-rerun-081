@@ -1,4 +1,4 @@
-import type { Definition, FlowEdge, FlowNode, Instance } from "./types";
+import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -35,4 +35,16 @@ export const api = {
     }),
   resumeInstance: (id: string) =>
     req<Instance>("/api/instances/" + id + "/resume", { method: "POST" })
+  ,
+  previewMigration: (id: string, target: { definitionId?: string; name?: string }) => {
+    const q = new URLSearchParams();
+    if (target.definitionId) q.set("definitionId", target.definitionId);
+    if (target.name) q.set("name", target.name);
+    return req<MigrationPreview>("/api/instances/" + id + "/migration?" + q.toString());
+  },
+  confirmMigration: (id: string, target: { definitionId?: string; name?: string }) =>
+    req<{ instance: Instance }>("/api/instances/" + id + "/migration", {
+      method: "POST",
+      body: JSON.stringify({ ...target, confirm: true })
+    })
 };

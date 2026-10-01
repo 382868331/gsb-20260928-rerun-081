@@ -85,8 +85,30 @@ type Instance struct {
 	// ConsumedInputs gives idempotency: same external input key advances only once.
 	ConsumedInputs map[string]bool `json:"consumedInputs"`
 	StoppedAt      string          `json:"stoppedAt,omitempty"` // precise node where execution stopped (incl. compensation failure)
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+
+	// Crash-safe compensation journal. When a task fails the instance enters
+	// the compensating phase until every succeeded task is undone (or one
+	// compensation itself fails). A restart mid-compensation resumes from this
+	// journal instead of re-running business tasks or completed compensations.
+	Compensating     bool            `json:"compensating,omitempty"`
+	FailedNode       string          `json:"failedNode,omitempty"` // node whose failure triggered compensation
+	CompensatedNodes map[string]bool `json:"compensatedNodes,omitempty"`
+
+	// DefinitionHistory audits explicit migrations of waiting instances. Old
+	// step records always keep the definition version they happened under; the
+	// histories of two versions are never spliced together.
+	DefinitionHistory []DefinitionRef `json:"definitionHistory,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// DefinitionRef records that an instance was pinned to a definition version.
+type DefinitionRef struct {
+	DefinitionID string    `json:"definitionId"`
+	Name         string    `json:"name"`
+	Version      int       `json:"version"`
+	Since        time.Time `json:"since"`
 }
 
 type ExternalInput struct {

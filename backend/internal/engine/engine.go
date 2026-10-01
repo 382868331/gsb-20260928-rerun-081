@@ -20,14 +20,183 @@ type CompensateHandler func(inst *model.Instance, node model.Node) error
 type Engine struct {
 	task       TaskHandler
 	compensate CompensateHandler
+	// onPersist, when set, is called after every state-changing compensation
+	// step so a crash mid-compensation resumes without redoing anything.
+	onPersist func(*model.Instance)
 }
 
 func New(task TaskHandler, compensate CompensateHandler) *Engine {
 	return &Engine{task: task, compensate: compensate}
 }
 
+// WithPersist installs a callback invoked after each durable engine step.
+func (e *Engine) WithPersist(fn func(*model.Instance)) *Engine {
+	e.onPersist = fn
+	return e
+}
+
+func (e *Engine) persist(inst *model.Instance) {
+	if e.onPersist != nil {
+		e.onPersist(inst)
+	}
+}
+
 type defLookup interface {
 	GetDefinition(id string) (*model.Definition, error)
+}
+
+// MigrationImpact describes what changes for a waiting instance if it is
+// switched to a new definition version. Only the wait point and the steps
+// that still lie ahead are affected; history under the old version is kept.
+type MigrationImpact struct {
+	InstanceID    string         `json:"instanceId"`
+	WaitNode      string         `json:"waitNode"`
+	WaitNodeName  string         `json:"waitNodeName"`
+	FromVersion   int            `json:"fromVersion"`
+	ToVersion     int            `json:"toVersion"`
+	WaitNodeInNew bool           `json:"waitNodeInNew"`
+	NewNodes      []model.Node   `json:"newNodes"`
+	RemovedNodes  []string       `json:"removedNodes"`
+	NewEdges      []model.Edge   `json:"newEdges"`
+	RemovedEdges  []string       `json:"removedEdges"`
+	AffectedAhead []AffectedStep `json:"affectedAhead"`
+}
+
+// AffectedStep is a node reachable after the wait point in the new graph that
+// is new/removed/changed and therefore changes what the instance will do.
+type AffectedStep struct {
+	NodeID string `json:"nodeId"`
+	Name   string `json:"name,omitempty"`
+	Kind   string `json:"kind"` // added / removed / changed / edge_added / edge_changed
+}
+
+// PreviewMigration computes the impact without changing the instance. The
+// wait node must still exist in the target definition (same id).
+func PreviewMigration(inst *model.Instance, from, to *model.Definition) (*MigrationImpact, error) {
+	if inst.Status != model.StatusWaiting || inst.WaitNode == "" {
+		return nil, fmt.Errorf("只有等待人工输入的实例才能迁移版本，当前状态为 %s", inst.Status)
+	}
+	if inst.DefinitionID == to.ID {
+		return nil, fmt.Errorf("实例已经使用该版本")
+	}
+	waitInNew := false
+	var waitName string
+	oldByID := map[string]model.Node{}
+	for _, n := range from.Nodes {
+		if n.ID == inst.WaitNode {
+			waitName = n.Name
+		}
+		oldByID[n.ID] = n
+	}
+	newByID := map[string]model.Node{}
+	for _, n := range to.Nodes {
+		newByID[n.ID] = n
+		if n.ID == inst.WaitNode {
+			waitInNew = true
+			if waitName == "" {
+				waitName = n.Name
+			}
+		}
+	}
+	if !waitInNew {
+		return nil, fmt.Errorf("新版本中不存在等待节点 %s，无法迁移；已运行实例继续使用旧版本", inst.WaitNode)
+	}
+
+	impact := &MigrationImpact{
+		InstanceID:    inst.ID,
+		WaitNode:      inst.WaitNode,
+		WaitNodeName:  waitName,
+		FromVersion:   from.Version,
+		ToVersion:     to.Version,
+		WaitNodeInNew: true,
+		NewNodes:      to.Nodes,
+		NewEdges:      to.Edges,
+	}
+	for _, n := range to.Nodes {
+		old, ok := oldByID[n.ID]
+		if !ok {
+			impact.AffectedAhead = append(impact.AffectedAhead, AffectedStep{NodeID: n.ID, Name: n.Name, Kind: "added"})
+		} else if old.Type != n.Type || old.Name != n.Name || old.CompensateTo != n.CompensateTo {
+			impact.AffectedAhead = append(impact.AffectedAhead, AffectedStep{NodeID: n.ID, Name: n.Name, Kind: "changed"})
+		}
+	}
+	for _, n := range from.Nodes {
+		if _, ok := newByID[n.ID]; !ok {
+			impact.RemovedNodes = append(impact.RemovedNodes, n.ID)
+			impact.AffectedAhead = append(impact.AffectedAhead, AffectedStep{NodeID: n.ID, Name: n.Name, Kind: "removed"})
+		}
+	}
+	oldEdges := map[string]model.Edge{}
+	for _, ed := range from.Edges {
+		oldEdges[ed.ID] = ed
+	}
+	newEdges := map[string]model.Edge{}
+	for _, ed := range to.Edges {
+		newEdges[ed.ID] = ed
+		old, ok := oldEdges[ed.ID]
+		if !ok {
+			impact.AffectedAhead = append(impact.AffectedAhead, AffectedStep{NodeID: ed.To, Kind: "edge_added"})
+		} else if old != ed {
+			impact.AffectedAhead = append(impact.AffectedAhead, AffectedStep{NodeID: ed.To, Kind: "edge_changed"})
+		}
+	}
+	for _, ed := range from.Edges {
+		if _, ok := newEdges[ed.ID]; !ok {
+			impact.RemovedEdges = append(impact.RemovedEdges, ed.ID)
+		}
+	}
+	// Keep only steps that actually lie ahead of (or at) the wait point in the
+	// new graph, so the user is not warned about already-finished history.
+	reachable := reachableFrom(to, inst.WaitNode)
+	var ahead []AffectedStep
+	for _, a := range impact.AffectedAhead {
+		if a.NodeID == inst.WaitNode || reachable[a.NodeID] {
+			ahead = append(ahead, a)
+		}
+	}
+	impact.AffectedAhead = ahead
+	return impact, nil
+}
+
+func reachableFrom(def *model.Definition, from string) map[string]bool {
+	out := map[string][]string{}
+	for _, ed := range def.Edges {
+		out[ed.From] = append(out[ed.From], ed.To)
+	}
+	seen := map[string]bool{}
+	queue := []string{from}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, next := range out[cur] {
+			if !seen[next] {
+				seen[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return seen
+}
+
+// MigrateWaiting switches a waiting instance to a new definition version
+// after the user has reviewed the impact. Existing records remain exactly as
+// they were under the old version; only future steps use the new graph.
+func (e *Engine) MigrateWaiting(inst *model.Instance, from, to *model.Definition) (*MigrationImpact, error) {
+	impact, err := PreviewMigration(inst, from, to)
+	if err != nil {
+		return nil, err
+	}
+	inst.DefinitionID = to.ID
+	inst.Version = to.Version
+	inst.DefinitionHistory = append(inst.DefinitionHistory, model.DefinitionRef{
+		DefinitionID: to.ID,
+		Name:         to.Name,
+		Version:      to.Version,
+		Since:        time.Now().UTC(),
+	})
+	e.addRecord(inst, inst.WaitNode, "", "definition_migrated", model.NodeEntered,
+		fmt.Sprintf("实例从 %s v%d 迁移到 v%d；旧版本 %d 条历史记录原样保留，后续步骤按新版本执行", from.Name, from.Version, to.Version, len(inst.Records)))
+	return impact, nil
 }
 
 func (e *Engine) addRecord(inst *model.Instance, nodeID, edgeID, action string, status model.NodeStatus, detail string) {
@@ -49,6 +218,12 @@ func (e *Engine) Run(def *model.Definition, inst *model.Instance) {
 	for _, n := range def.Nodes {
 		nodeMap[n.ID] = n
 	}
+	// Crash recovery: a forward Run must never re-execute a task that already
+	// produced a succeed record. Reconcile the current node from the last real
+	// movement event recorded on disk.
+	if inst.Status == model.StatusRunning {
+		reconcileCurrentNode(def, inst)
+	}
 	for inst.Status == model.StatusRunning {
 		node, ok := nodeMap[inst.CurrentNode]
 		if !ok {
@@ -69,19 +244,25 @@ func (e *Engine) Run(def *model.Definition, inst *model.Instance) {
 			e.advance(def, inst, node, "")
 		case model.NodeTask:
 			e.addRecord(inst, node.ID, "", "enter", model.NodeEntered, node.Name)
-			if err := e.task(inst, node); err != nil {
-				e.addRecord(inst, node.ID, "", "fail", model.NodeFailed, err.Error())
-				e.compensateBackward(def, inst, node)
-				return
+			// Idempotent after a crash between task success and persistence of
+			// the advance: if this node already succeeded, never run it twice.
+			if nodeSucceeded(inst, node.ID) {
+				e.advance(def, inst, node, "")
+			} else {
+				if err := e.task(inst, node); err != nil {
+					e.addRecord(inst, node.ID, "", "fail", model.NodeFailed, err.Error())
+					e.startCompensation(def, inst, node)
+					return
+				}
+				e.addRecord(inst, node.ID, "", "succeed", model.NodeSucceeded, node.Name)
+				e.advance(def, inst, node, "")
 			}
-			e.addRecord(inst, node.ID, "", "succeed", model.NodeSucceeded, node.Name)
-			e.advance(def, inst, node, "")
 		case model.NodeDecision:
 			e.addRecord(inst, node.ID, "", "enter", model.NodeEntered, node.Name)
 			edge, err := pickEdge(def.Edges, node.ID, inst.Data)
 			if err != nil {
 				e.addRecord(inst, node.ID, "", "fail", model.NodeFailed, err.Error())
-				e.compensateBackward(def, inst, node)
+				e.startCompensation(def, inst, node)
 				return
 			}
 			e.addRecord(inst, node.ID, edge.ID, "branch", model.NodeSucceeded, edgeLabel(edge))
@@ -187,13 +368,32 @@ func (e *Engine) Resume(def *model.Definition, inst *model.Instance) {
 	if inst.Status != model.StatusRunning {
 		return
 	}
+	if inst.Compensating {
+		// A crash happened while compensating. The journal tells us exactly
+		// which compensations already completed; never invoke them again.
+		failed := defNodeOrMissing(def, inst.FailedNode)
+		e.continueCompensation(def, inst, failed)
+		return
+	}
 	e.Run(def, inst)
 }
 
-// compensateBackward walks succeeded task nodes back along the recorded path
-// and invokes their compensation. A failing compensation stops everything
-// and records the true stopping node.
-func (e *Engine) compensateBackward(def *model.Definition, inst *model.Instance, failed model.Node) {
+// startCompensation opens the compensation journal and starts undoing
+// succeeded tasks in reverse execution order.
+func (e *Engine) startCompensation(def *model.Definition, inst *model.Instance, failed model.Node) {
+	inst.Compensating = true
+	inst.FailedNode = failed.ID
+	if inst.CompensatedNodes == nil {
+		inst.CompensatedNodes = map[string]bool{}
+	}
+	e.continueCompensation(def, inst, failed)
+}
+
+// continueCompensation walks succeeded task nodes back along the recorded
+// path and invokes their compensation, skipping any node already marked in
+// the journal. A failing compensation stops everything and records the true
+// stopping node. Safe to re-enter after a crash/restart.
+func (e *Engine) continueCompensation(def *model.Definition, inst *model.Instance, failed model.Node) {
 	nodeMap := map[string]model.Node{}
 	for _, n := range def.Nodes {
 		nodeMap[n.ID] = n
@@ -210,9 +410,13 @@ func (e *Engine) compensateBackward(def *model.Definition, inst *model.Instance,
 			}
 		}
 	}
-	// The failed node itself may have a compensator too; include tasks reversed.
+	// Reverse order; the failed node itself never succeeded so is not listed.
 	for i := len(succeeded) - 1; i >= 0; i-- {
 		node := nodeMap[succeeded[i]]
+		if inst.CompensatedNodes[node.ID] {
+			// Completed before the crash (or on a previous resume): never twice.
+			continue
+		}
 		targetID := node.CompensateTo
 		if targetID == "" {
 			targetID = node.ID
@@ -223,13 +427,68 @@ func (e *Engine) compensateBackward(def *model.Definition, inst *model.Instance,
 			e.addRecord(inst, node.ID, "", "compensation_fail", model.NodeCompFailed, err.Error())
 			inst.Status = model.StatusFailed
 			inst.StoppedAt = node.ID
+			inst.Compensating = false
 			return
 		}
 		e.addRecord(inst, node.ID, "", "compensated", model.NodeCompensated, node.Name)
+		// Journal each success immediately so a later crash cannot redo it.
+		inst.CompensatedNodes[node.ID] = true
+		e.persist(inst)
 	}
-	e.addRecord(inst, failed.ID, "", "compensate_done", model.NodeFailed, "失败后补偿全部完成")
+	if failed.ID != "" {
+		e.addRecord(inst, failed.ID, "", "compensate_done", model.NodeFailed, "失败后补偿全部完成")
+	}
 	inst.Status = model.StatusFailed
 	inst.StoppedAt = failed.ID
+	inst.Compensating = false
+}
+
+func defNodeOrMissing(def *model.Definition, id string) model.Node {
+	for _, n := range def.Nodes {
+		if n.ID == id {
+			return n
+		}
+	}
+	return model.Node{ID: id}
+}
+
+// nodeSucceeded reports whether a task node already produced a succeed event
+// in the current execution segment, i.e. since the last external input (or
+// from the start). Events from before a wait/input boundary belong to an
+// already-finished segment and must not suppress execution after migration
+// to a definition that happens to reuse a node id.
+func nodeSucceeded(inst *model.Instance, nodeID string) bool {
+	start := 0
+	for i, rec := range inst.Records {
+		if rec.Action == "input_received" {
+			start = i + 1
+		}
+	}
+	for i := start; i < len(inst.Records); i++ {
+		rec := inst.Records[i]
+		if rec.NodeID == nodeID && rec.Action == "succeed" {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcileCurrentNode rebuilds CurrentNode from the last recorded movement so
+// a crash between advancing and saving does not replay an executed node.
+func reconcileCurrentNode(def *model.Definition, inst *model.Instance) {
+	current := inst.CurrentNode
+	for _, rec := range inst.Records {
+		if rec.Action == "traverse" && rec.NodeID != "" {
+			current = rec.NodeID
+		} else if rec.Action == "branch" && rec.EdgeID != "" {
+			for _, edge := range def.Edges {
+				if edge.ID == rec.EdgeID {
+					current = edge.To
+				}
+			}
+		}
+	}
+	inst.CurrentNode = current
 }
 
 func outgoing(edges []model.Edge, from string) []model.Edge {

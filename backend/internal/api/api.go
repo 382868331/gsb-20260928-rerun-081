@@ -16,9 +16,11 @@ type Server struct {
 }
 
 func NewHandler(st *store.Store, eng *engine.Engine) http.Handler {
+	eng.WithPersist(func(inst *model.Instance) { _ = st.SaveInstance(inst) })
 	s := &Server{store: st, engine: eng}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/processes", s.listProcesses)
 	mux.HandleFunc("/api/definitions", s.definitions)
 	mux.HandleFunc("/api/definitions/", s.getDef)
 	mux.HandleFunc("/api/instances", s.instances)
@@ -50,6 +52,18 @@ func (s *Server) instances(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// listProcesses returns each process name with its latest version and counts
+// of waiting instances, so the UI can drive empty/first-use flows and offer
+// version migration without scanning every definition client-side.
+func (s *Server) listProcesses(w http.ResponseWriter, r *http.Request) {
+	latest, err := s.store.LatestDefinitionsByName()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, latest)
 }
 
 type publishReq struct {
@@ -137,6 +151,8 @@ func (s *Server) startInstance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resumeInstance(w http.ResponseWriter, r *http.Request, id string) {
+	unlock := s.store.LockInstance(id)
+	defer unlock()
 	inst, err := s.store.GetInstance(id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err)
@@ -191,6 +207,14 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.resumeInstance(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "migration" && r.Method == http.MethodGet {
+		s.previewMigration(w, r, id)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "migration" && r.Method == http.MethodPost {
+		s.confirmMigration(w, r, id)
+		return
+	}
 	writeErr(w, http.StatusNotFound, errMissing("route"))
 }
 
@@ -200,6 +224,8 @@ func (s *Server) deliverInput(w http.ResponseWriter, r *http.Request, id string)
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	unlock := s.store.LockInstance(id)
+	defer unlock()
 	inst, err := s.store.GetInstance(id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err)
@@ -220,6 +246,103 @@ func (s *Server) deliverInput(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	writeJSON(w, http.StatusOK, inst)
+}
+
+type migrationReq struct {
+	DefinitionID string `json:"definitionId"`
+	Name         string `json:"name"` // alternative: migrate to latest version of this process name
+	Confirm      bool   `json:"confirm"`
+}
+
+func (s *Server) migrationTarget(w http.ResponseWriter, inst *model.Instance, req migrationReq) *model.Definition {
+	if req.DefinitionID != "" {
+		def, err := s.store.GetDefinition(req.DefinitionID)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return nil
+		}
+		return def
+	}
+	name := req.Name
+	if name == "" {
+		if cur, err := s.store.GetDefinition(inst.DefinitionID); err == nil {
+			name = cur.Name
+		}
+	}
+	def, err := s.store.LatestDefinition(name)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return nil
+	}
+	return def
+}
+
+func (s *Server) previewMigration(w http.ResponseWriter, r *http.Request, id string) {
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	from, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	var req migrationReq
+	if r.URL.RawQuery != "" {
+		req.DefinitionID = r.URL.Query().Get("definitionId")
+		req.Name = r.URL.Query().Get("name")
+	}
+	to := s.migrationTarget(w, inst, req)
+	if to == nil {
+		return
+	}
+	impact, err := engine.PreviewMigration(inst, from, to)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"impact": impact, "from": from, "to": to})
+}
+
+func (s *Server) confirmMigration(w http.ResponseWriter, r *http.Request, id string) {
+	var req migrationReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !req.Confirm {
+		writeErr(w, http.StatusBadRequest, errMissing("confirm（请先查看受影响步骤并确认）"))
+		return
+	}
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	from, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	to := s.migrationTarget(w, inst, req)
+	if to == nil {
+		return
+	}
+	impact, err := s.engine.MigrateWaiting(inst, from, to)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"impact": impact, "instance": inst})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

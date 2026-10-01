@@ -18,13 +18,18 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("definitions");
   const [definitions, setDefinitions] = useState<Definition[]>([]);
   const [error, setError] = useState("");
+  const [defsStatus, setDefsStatus] = useState<"loading" | "ready" | "error">("loading");
 
   const loadDefs = useCallback(async () => {
     try {
       setError("");
-      setDefinitions(await api.listDefinitions());
+      setDefsStatus("loading");
+      const list = await api.listDefinitions();
+      setDefinitions(list);
+      setDefsStatus("ready");
     } catch (e) {
       setError((e as Error).message);
+      setDefsStatus("error");
     }
   }, []);
 
@@ -63,14 +68,23 @@ export default function App() {
         </nav>
         {error && <span className="error header-error">{error}（请确认后端已在 :8080 启动）</span>}
       </header>
-      <ErrorBoundary>
-        {tab === "definitions" && <Editor definitions={definitions} onPublish={publish} />}
+      <ErrorBoundary resetKey={tab}>
+        {tab === "definitions" && (
+          <Editor
+            definitions={definitions}
+            onPublish={publish}
+            status={defsStatus}
+            loadError={error}
+            onRetryLoad={loadDefs}
+          />
+        )}
         {tab === "instances" && (
           <Instances
             definitions={definitions}
             latestByName={latestByName}
             refreshKey={definitions.length}
             onEditedPublished={() => loadDefs()}
+            onGoEditor={() => setTab("definitions")}
           />
         )}
         {tab === "history" && <History definitions={definitions} />}

@@ -22,6 +22,7 @@ const ACTION_LABEL: Record<string, string> = {
   compensated: "补偿生效",
   compensation_fail: "补偿失败",
   compensate_done: "补偿全部完成",
+  definition_migrated: "迁移到新定义版本",
   complete: "流程完成"
 };
 

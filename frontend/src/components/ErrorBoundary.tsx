@@ -4,7 +4,12 @@ interface State {
   error: Error | null;
 }
 
-export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
+interface Props {
+  children: ReactNode;
+  resetKey?: string;
+}
+
+export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
 
   static getDerivedStateFromError(error: Error): State {
@@ -14,6 +19,14 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
   componentDidCatch(error: Error) {
     // Keep a trace in console; the boundary itself prevents a full white screen.
     console.error("页面渲染失败：", error);
+  }
+
+  componentDidUpdate(prev: Props) {
+    // Switching tabs/context clears a previous render failure so one broken
+    // view can never permanently hide the rest of the app.
+    if (this.state.error && prev.resetKey !== this.props.resetKey) {
+      this.setState({ error: null });
+    }
   }
 
   render() {

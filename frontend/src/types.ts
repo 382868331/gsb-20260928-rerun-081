@@ -38,6 +38,32 @@ export interface StepRecord {
   occurredAt: string;
 }
 
+export type AffectedKind = "added" | "removed" | "changed" | "edge_added" | "edge_changed";
+
+export interface AffectedStep {
+  nodeId: string;
+  name?: string;
+  kind: AffectedKind;
+}
+
+export interface MigrationImpact {
+  instanceId: string;
+  waitNode: string;
+  waitNodeName: string;
+  fromVersion: number;
+  toVersion: number;
+  waitNodeInNew: boolean;
+  removedNodes: string[];
+  removedEdges: string[];
+  affectedAhead: AffectedStep[];
+}
+
+export interface MigrationPreview {
+  impact: MigrationImpact;
+  from: Definition;
+  to: Definition;
+}
+
 export interface Instance {
   id: string;
   definitionId: string;
@@ -49,6 +75,10 @@ export interface Instance {
   records: StepRecord[];
   consumedInputs: Record<string, boolean>;
   stoppedAt?: string;
+  compensating?: boolean;
+  failedNode?: string;
+  compensatedNodes?: Record<string, boolean>;
+  definitionHistory?: { definitionId: string; name: string; version: number; since: string }[];
   createdAt: string;
   updatedAt: string;
 }

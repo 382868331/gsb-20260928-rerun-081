@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ReactFlow, ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type { Definition, FlowNode, NodeType } from "../types";
@@ -8,14 +8,38 @@ import { TYPE_LABEL, definitionToFlow, nodeColor } from "../flowView";
 interface Props {
   definitions: Definition[];
   onPublish: (name: string, nodes: FlowNode[], edges: typeof templateEdges) => Promise<void>;
+  status: "loading" | "ready" | "error";
+  loadError: string;
+  onRetryLoad: () => void;
 }
 
 let counter = 100;
+const DRAFT_KEY = "flowplatform.editor.draft.v1";
 
-export function Editor({ definitions, onPublish }: Props) {
-  const [name, setName] = useState("order-demo");
-  const [nodes, setNodes] = useState<FlowNode[]>(templateNodes);
-  const [edges, setEdges] = useState(templateEdges);
+interface Draft {
+  name: string;
+  nodes: FlowNode[];
+  edges: typeof templateEdges;
+}
+
+function loadDraft(): Draft | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as Draft;
+    if (!Array.isArray(d.nodes) || d.nodes.length === 0) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
+
+export function Editor({ definitions, onPublish, status, loadError, onRetryLoad }: Props) {
+  const restored = useMemo(loadDraft, []);
+  const [name, setName] = useState(restored?.name ?? "order-demo");
+  const [nodes, setNodes] = useState<FlowNode[]>(restored?.nodes ?? templateNodes);
+  const [edges, setEdges] = useState(restored ? restored.edges : templateEdges);
+  const [draftRestored, setDraftRestored] = useState(!!restored);
   const [selected, setSelected] = useState<string | null>("check");
   const [from, setFrom] = useState("check");
   const [to, setTo] = useState("end");
@@ -23,6 +47,16 @@ export function Editor({ definitions, onPublish }: Props) {
   const [edgeLabel, setEdgeLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // Persist the in-progress draft so a browser refresh never loses edits
+  // that have not been published yet.
+  useEffect(() => {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ name, nodes, edges }));
+    } catch {
+      // Storage may be unavailable (private mode); editing still works.
+    }
+  }, [name, nodes, edges]);
 
   const flow = useMemo(() => definitionToFlow({ nodes, edges }), [nodes, edges]);
   const selectedNode = nodes.find((n) => n.id === selected) || null;
@@ -72,6 +106,12 @@ export function Editor({ definitions, onPublish }: Props) {
     setEdges(templateEdges.map((e) => ({ ...e })));
     setName("order-demo");
     setSelected("check");
+    setDraftRestored(false);
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+    } catch {
+      // ignore
+    }
   }
 
   async function publish() {
@@ -79,6 +119,12 @@ export function Editor({ definitions, onPublish }: Props) {
     setError("");
     try {
       await onPublish(name, nodes, edges);
+      try {
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {
+        // ignore
+      }
+      setDraftRestored(false);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -142,6 +188,7 @@ export function Editor({ definitions, onPublish }: Props) {
 
         <button className="primary" disabled={busy} onClick={publish}>{busy ? "发布中…" : "发布为新版本（不可变）"}</button>
         <button onClick={resetTemplate} style={{ marginTop: 6 }}>重置为示例模板</button>
+        {draftRestored && <div className="notice">已从浏览器本地恢复上次未发布的草稿；发布成功后会自动清除。</div>}
         {error && <div className="error">{error}</div>}
       </aside>
 
@@ -160,15 +207,28 @@ export function Editor({ definitions, onPublish }: Props) {
       <aside className="panel versions">
         <h2>已发布定义（{definitions.length}）</h2>
         <p className="hint">点开版本可载入画布修改，再以同名发布新版本；已有实例继续固定启动时版本。</p>
-        {definitions.length === 0 && <p className="hint">还没有已发布定义，先发布当前模板。</p>}
-        {[...definitions].reverse().map((d) => (
-          <div key={d.id} className="version-card">
-            <strong>{d.name}</strong> <span className="badge">v{d.version}</span>
-            <div className="hint">{d.id}</div>
-            <div className="hint">节点 {d.nodes.length} · 边 {d.edges.length}</div>
-            <button onClick={() => loadVersion(d)}>载入到画布修改</button>
+        {status === "loading" && <div className="state-loading">正在加载已发布定义…</div>}
+        {status === "error" && (
+          <div className="state-error">
+            <div className="error">定义列表加载失败：{loadError || "网络错误"}</div>
+            <button onClick={onRetryLoad}>重新加载</button>
           </div>
-        ))}
+        )}
+        {status === "ready" && definitions.length === 0 && (
+          <div className="state-empty">
+            <p className="hint">还没有任何流程定义。</p>
+            <p className="hint">左侧已准备好示例模板：检查节点与连接后点击「发布为新版本」，即可到「实例列表」启动实例。</p>
+          </div>
+        )}
+        {status === "ready" &&
+          [...definitions].reverse().map((d) => (
+            <div key={d.id} className="version-card">
+              <strong>{d.name}</strong> <span className="badge">v{d.version}</span>
+              <div className="hint">{d.id}</div>
+              <div className="hint">节点 {d.nodes.length} · 边 {d.edges.length}</div>
+              <button onClick={() => loadVersion(d)}>载入到画布修改</button>
+            </div>
+          ))}
       </aside>
     </div>
   );
