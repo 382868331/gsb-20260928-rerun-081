@@ -12,15 +12,24 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// listReq never lets a malformed/null body (e.g. an old backend returning
+// null for empty data) crash the whole page: lists are always arrays.
+async function listReq<T>(url: string): Promise<T[]> {
+  const data = await req<unknown>(url);
+  if (data == null) return [];
+  if (!Array.isArray(data)) throw new Error("服务返回了不可遍历的数据");
+  return data as T[];
+}
+
 export const api = {
-  listDefinitions: () => req<Definition[]>("/api/definitions"),
+  listDefinitions: () => listReq<Definition>("/api/definitions"),
   publish: (name: string, nodes: FlowNode[], edges: FlowEdge[]) =>
     req<Definition>("/api/definitions", {
       method: "POST",
       body: JSON.stringify({ name, nodes, edges })
     }),
   getDefinition: (id: string) => req<Definition>("/api/definitions/" + id),
-  listInstances: () => req<Instance[]>("/api/instances"),
+  listInstances: () => listReq<Instance>("/api/instances"),
   startInstance: (definitionId: string, data: Record<string, unknown>, name?: string) =>
     req<Instance>("/api/instances", {
       method: "POST",
@@ -28,10 +37,24 @@ export const api = {
     }),
   getInstance: (id: string) =>
     req<{ instance: Instance; definition: Definition }>("/api/instances/" + id),
-  deliverInput: (id: string, waitNode: string, key: string, payload: Record<string, unknown>) =>
+  deliverInput: (id: string, waitNode: string, key: string, payload: Record<string, unknown>, from?: string) =>
     req<Instance>("/api/instances/" + id + "/inputs", {
       method: "POST",
-      body: JSON.stringify({ waitNode, key, payload })
+      body: JSON.stringify({ waitNode, key, payload, from: from || undefined })
+    }),
+  evaluateTimeout: (id: string) =>
+    req<Instance>("/api/instances/" + id + "/timeout", { method: "POST" }),
+  updateWaitScope: (id: string, req2: {
+    participants?: string[];
+    allowDelegate?: boolean;
+    grantDelegations?: Record<string, string>;
+    revokeDelegations?: string[];
+    keepPriorInputs: boolean;
+    reason?: string;
+  }) =>
+    req<Instance>("/api/instances/" + id + "/wait/scope", {
+      method: "POST",
+      body: JSON.stringify(req2)
     }),
   resumeInstance: (id: string) =>
     req<Instance>("/api/instances/" + id + "/resume", { method: "POST" })

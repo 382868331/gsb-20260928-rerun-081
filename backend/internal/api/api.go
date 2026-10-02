@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"flowplatform/internal/engine"
 	"flowplatform/internal/model"
@@ -207,6 +208,14 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.resumeInstance(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "timeout" && r.Method == http.MethodPost {
+		s.evaluateTimeout(w, r, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "wait" && parts[2] == "scope" && r.Method == http.MethodPost {
+		s.updateWaitScope(w, r, id)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "migration" && r.Method == http.MethodGet {
 		s.previewMigration(w, r, id)
 		return
@@ -343,6 +352,62 @@ func (s *Server) confirmMigration(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"impact": impact, "instance": inst})
+}
+
+// evaluateTimeout lets an operator (or scheduler) trigger the deadline
+// check for a collaborative wait. The decision itself is made at most once;
+// calling again after a decision is a no-op.
+func (s *Server) evaluateTimeout(w http.ResponseWriter, r *http.Request, id string) {
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.engine.CheckTimeout(def, inst, time.Now().UTC())
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+// updateWaitScope changes the acceptance scope of a live collaborative wait
+// (participants / delegation grants / revocations). Every change is appended
+// as a new authorization version; the old ones stay in the instance history.
+func (s *Server) updateWaitScope(w http.ResponseWriter, r *http.Request, id string) {
+	var req engine.ScopeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.engine.UpdateWaitScope(def, inst, req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

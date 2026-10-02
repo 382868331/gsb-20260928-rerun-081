@@ -5,6 +5,10 @@ export interface FlowNode {
   type: NodeType;
   name: string;
   compensateTo?: string;
+  participants?: string[];
+  allowDelegate?: boolean;
+  timeoutSeconds?: number;
+  timeoutPolicy?: string;
   x: number;
   y: number;
 }
@@ -79,6 +83,34 @@ export interface Instance {
   failedNode?: string;
   compensatedNodes?: Record<string, boolean>;
   definitionHistory?: { definitionId: string; name: string; version: number; since: string }[];
+  wait?: WaitState;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PartyInput {
+  key: string;
+  from: string;
+  authId: string;
+  at: string;
+}
+
+export interface WaitAuthorization {
+  id: string;
+  participants: string[];
+  allowDelegate: boolean;
+  delegations?: Record<string, string>;
+  since: string;
+  reason?: string;
+  priorInputsKept: boolean;
+}
+
+export interface WaitState {
+  authId: string;
+  received: Record<string, PartyInput>;
+  authorizations: WaitAuthorization[];
+  deadline?: string;
+  decided?: boolean;
+  decision?: string;
+  decisionAuthId?: string;
 }

@@ -48,7 +48,8 @@ export default function App() {
 
   const latestByName = useMemo(() => {
     const m = new Map<string, Definition>();
-    for (const d of definitions) {
+    for (const d of definitions ?? []) {
+      if (!d || !Array.isArray(d.nodes) || !Array.isArray(d.edges)) continue;
       const cur = m.get(d.name);
       if (!cur || d.version > cur.version) m.set(d.name, d);
     }
@@ -56,6 +57,7 @@ export default function App() {
   }, [definitions]);
 
   return (
+    <ErrorBoundary resetKey={tab}>
     <div className="app">
       <header>
         <h1>业务流程运行平台</h1>
@@ -90,5 +92,6 @@ export default function App() {
         {tab === "history" && <History definitions={definitions} />}
       </ErrorBoundary>
     </div>
+    </ErrorBoundary>
   );
 }

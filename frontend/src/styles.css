@@ -131,3 +131,14 @@ button.danger-confirm { background: #7c3aed; color: #fff; border-color: #7c3aed;
   display: flex; flex-direction: column; gap: 2px;
 }
 .summary-grid b { font-size: 13px; }
+
+.wait-props { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; margin: 8px 0; }
+.wait-props legend { font-size: 12px; color: #7c3aed; padding: 0 4px; }
+.checkbox { display: flex; align-items: center; gap: 6px; }
+.checkbox input { width: auto; }
+.collab-section { border-top: 1px solid #e2e8f0; margin-top: 12px; padding-top: 8px; }
+.party-list, .auth-history { list-style: none; padding: 0; margin: 6px 0; font-size: 13px; }
+.party-list li { padding: 3px 0; }
+.party-done { color: #15803d; }
+.auth-history li { padding: 3px 0; color: #475569; border-bottom: 1px dashed #e2e8f0; }
+.collab-section h4 { margin: 10px 0 4px; }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ReactFlow, ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api } from "../api";
-import type { Definition, Instance, MigrationPreview, StepRecord } from "../types";
+import type { Definition, Instance, MigrationPreview, StepRecord, WaitState } from "../types";
 import { applyExecution, definitionToFlow } from "../flowView";
 import { RecordList, STATUS_LABEL, stopLabel, consumedKeys } from "./RecordList";
 
@@ -22,6 +22,7 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
   const [initData, setInitData] = useState('{\n  "amount": 200\n}');
   const [inputKey, setInputKey] = useState("approve-001");
   const [inputPayload, setInputPayload] = useState('{\n  "approved": true\n}');
+  const [inputFrom, setInputFrom] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -112,7 +113,7 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
       const payload = JSON.parse(inputPayload || "{}");
       const key = inputKey.trim();
       if (!key) throw new Error("请填写幂等键 key（相同 key 的迟到/重复输入不会重做业务动作）");
-      const inst = await api.deliverInput(detail.instance.id, detail.instance.waitNode || "", key, payload);
+      const inst = await api.deliverInput(detail.instance.id, detail.instance.waitNode || "", key, payload, inputFrom || undefined);
       await loadDetail(inst.id);
       await loadList(inst.id);
       const late = lastSpecial(inst.records, key);
@@ -263,6 +264,16 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
         <h2>人工输入</h2>
         {detail?.instance.status === "waiting" ? (
           <>
+            {detail.instance.wait && (
+              <label>参与方 from（协作等待必须指明）
+                <select value={inputFrom} onChange={(e) => setInputFrom(e.target.value)}>
+                  <option value="">请选择参与方</option>
+                  {effectiveParties(detail.instance.wait).map((p) => (
+                    <option key={p} value={p}>{p}{detail.instance.wait!.received[p] ? "（已确认）" : ""}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label>幂等键 key（相同 key 的重复 / 迟到提交只生效一次）
               <input value={inputKey} onChange={(e) => setInputKey(e.target.value)} placeholder="approve-001" />
             </label>
@@ -284,6 +295,22 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
 
         <h3>已生效的输入 key</h3>
         <div className="consumed">{consumedKeys(detail?.instance).length ? consumedKeys(detail!.instance).map((k) => <span key={k} className="key-chip">{k}</span>) : <span className="hint">无</span>}</div>
+
+        {detail?.instance.wait && (
+          <CollabWaitSection
+            wait={detail.instance.wait}
+            instanceId={detail.instance.id}
+            waiting={detail.instance.status === "waiting"}
+            busy={busy}
+            setBusy={setBusy}
+            onChanged={async () => {
+              await loadDetail(detail.instance.id);
+              await loadList(detail.instance.id);
+            }}
+            onNotice={setNotice}
+            onError={setError}
+          />
+        )}
 
         {detail?.instance.status === "waiting" && (
           <MigrationSection
@@ -444,6 +471,163 @@ function MigrationSection({
           <button className="primary danger-confirm" disabled={busy} onClick={doConfirm}>我已了解受影响步骤，确认迁移</button>
         </div>
       )}
+    </div>
+  );
+}
+
+// effectiveParties lists who may confirm right now (delegates replace their
+// delegators) under the current authorization scope.
+function effectiveParties(wait: WaitState): string[] {
+  const auth = wait.authorizations[wait.authorizations.length - 1];
+  if (!auth) return [];
+  const out: string[] = [];
+  for (const p of auth.participants) {
+    const d = auth.delegations?.[p];
+    out.push(d || p);
+  }
+  return [...new Set(out)];
+}
+
+const DECISION_LABEL: Record<string, string> = {
+  approved: "全部确认通过",
+  rejected: "已拒绝",
+  timeout_approved: "超时按策略通过",
+  timeout_rejected: "超时按策略拒绝"
+};
+
+function CollabWaitSection({
+  wait,
+  instanceId,
+  waiting,
+  busy,
+  setBusy,
+  onChanged,
+  onNotice,
+  onError
+}: {
+  wait: WaitState;
+  instanceId: string;
+  waiting: boolean;
+  busy: boolean;
+  setBusy: (b: boolean) => void;
+  onChanged: () => Promise<void>;
+  onNotice: (s: string) => void;
+  onError: (s: string) => void;
+}) {
+  const auth = wait.authorizations[wait.authorizations.length - 1];
+  const [participants, setParticipants] = useState(auth?.participants.join(",") || "");
+  const [reason, setReason] = useState("");
+  const [keepPrior, setKeepPrior] = useState(true);
+  const [grantFrom, setGrantFrom] = useState("");
+  const [grantTo, setGrantTo] = useState("");
+  const [revoke, setRevoke] = useState("");
+
+  async function run(fn: () => Promise<unknown>, ok: string) {
+    onError("");
+    onNotice("");
+    setBusy(true);
+    try {
+      await fn();
+      onNotice(ok);
+      await onChanged();
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function applyScope() {
+    const list = participants.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+    const grants: Record<string, string> = {};
+    if (grantFrom && grantTo) grants[grantFrom] = grantTo;
+    return run(
+      () =>
+        api.updateWaitScope(instanceId, {
+          participants: list,
+          grantDelegations: Object.keys(grants).length ? grants : undefined,
+          revokeDelegations: revoke ? [revoke] : undefined,
+          keepPriorInputs: keepPrior,
+          reason: reason || undefined
+        }),
+      "接收范围已更新；新旧授权记录都保留在下方历史中"
+    );
+  }
+
+  return (
+    <div className="collab-section">
+      <h3>协作等待（多方输入）</h3>
+      {wait.decided ? (
+        <p className="hint">
+          已决定：<b>{DECISION_LABEL[wait.decision || ""] || wait.decision}</b>
+          （依据当时授权范围 {wait.decisionAuthId}）
+        </p>
+      ) : (
+        <p className="hint">
+          需全部参与方确认后才完成；当前 {Object.keys(wait.received).length}/{auth?.participants.length ?? 0}。
+          {wait.deadline ? "到期时间：" + new Date(wait.deadline).toLocaleString() : "不限时。"}
+        </p>
+      )}
+      <ul className="party-list">
+        {auth?.participants.map((p) => {
+          const delegate = auth.delegations?.[p];
+          const effective = delegate || p;
+          const got = wait.received[effective];
+          return (
+            <li key={p} className={got ? "party-done" : ""}>
+              {got ? "✅" : "⏳"} {p}
+              {delegate ? <span className="hint">（已委托 {delegate}）</span> : null}
+              {got ? <span className="hint">　已于 {new Date(got.at).toLocaleTimeString()} 确认（范围 {got.authId}）</span> : null}
+            </li>
+          );
+        })}
+      </ul>
+
+      {waiting && !wait.decided && (
+        <>
+          <h4>修改接收范围 / 委托</h4>
+          <label>参与方（逗号分隔）
+            <input value={participants} onChange={(e) => setParticipants(e.target.value)} />
+          </label>
+          <label>委托：参与方
+            <select value={grantFrom} onChange={(e) => setGrantFrom(e.target.value)}>
+              <option value="">（不新增委托）</option>
+              {auth?.participants.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </label>
+          {grantFrom && (
+            <label>代为确认的受托方
+              <input value={grantTo} onChange={(e) => setGrantTo(e.target.value)} placeholder="dave" />
+            </label>
+          )}
+          <label>撤回委托（参与方）
+            <select value={revoke} onChange={(e) => setRevoke(e.target.value)}>
+              <option value="">（不撤回）</option>
+              {Object.keys(auth?.delegations || {}).map((p) => <option key={p} value={p}>{p}（现受托 {auth!.delegations![p]}）</option>)}
+            </select>
+          </label>
+          <label className="checkbox">
+            <input type="checkbox" checked={keepPrior} onChange={(e) => setKeepPrior(e.target.checked)} />
+            此前已收到的输入仍然有效（取消勾选则全部失效，仅作历史保留）
+          </label>
+          <label>变更说明<input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="bob 休假，委托 dave" /></label>
+          <button disabled={busy} onClick={applyScope}>应用范围变更（旧授权记录保留）</button>
+          <button disabled={busy} onClick={() => run(() => api.evaluateTimeout(instanceId), "已执行到期判定")}>立即进行到期判定</button>
+        </>
+      )}
+
+      <h4>授权记录（{wait.authorizations.length} 个版本，全部保留）</h4>
+      <ul className="auth-history">
+        {wait.authorizations.map((a) => (
+          <li key={a.id}>
+            <b>{a.id}</b>：{a.participants.join("、")}；委托{a.allowDelegate ? "允许" : "不允许"}
+            {Object.keys(a.delegations || {}).length > 0 &&
+              "；" + Object.entries(a.delegations!).map(([k, v]) => k + "→" + v).join("，")}
+            {a.priorInputsKept ? "；此前输入有效" : "；此前输入失效"}
+            {a.reason ? "；" + a.reason : ""}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

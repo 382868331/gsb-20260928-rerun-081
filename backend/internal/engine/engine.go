@@ -268,10 +268,7 @@ func (e *Engine) Run(def *model.Definition, inst *model.Instance) {
 			e.addRecord(inst, node.ID, edge.ID, "branch", model.NodeSucceeded, edgeLabel(edge))
 			inst.CurrentNode = edge.To
 		case model.NodeWait:
-			e.addRecord(inst, node.ID, "", "wait", model.NodeEntered, node.Name)
-			inst.Status = model.StatusWaiting
-			inst.WaitNode = node.ID
-			inst.StoppedAt = node.ID
+			e.enterWait(inst, node)
 			return
 		}
 	}
@@ -318,26 +315,18 @@ func (e *Engine) DeliverInput(def *model.Definition, inst *model.Instance, input
 	if input.WaitNode != "" && input.WaitNode != inst.WaitNode {
 		return fmt.Errorf("输入目标节点 %s 与等待节点 %s 不一致", input.WaitNode, inst.WaitNode)
 	}
+	if inst.Wait != nil {
+		// Collaborative wait: needs every effective participant; partial
+		// input never completes the step.
+		return e.deliverCollaborative(def, inst, input)
+	}
 	for k, v := range input.Payload {
 		inst.Data[k] = v
 	}
 	inst.ConsumedInputs[input.Key] = true
 	waitNode := inst.WaitNode
 	e.addRecord(inst, waitNode, "", "input_received", model.NodeSucceeded, "接收输入 "+input.Key)
-	inst.WaitNode = ""
-	inst.Status = model.StatusRunning
-	// The wait node itself is now complete; move along its outgoing edge once.
-	out := outgoing(def.Edges, waitNode)
-	if len(out) == 0 {
-		inst.Status = model.StatusFailed
-		inst.StoppedAt = waitNode
-		e.addRecord(inst, waitNode, "", "fail", model.NodeFailed, "等待节点没有后继边")
-		return nil
-	}
-	edge := out[0]
-	e.addRecord(inst, edge.To, edge.ID, "traverse", model.NodeEntered, edgeLabel(edge))
-	inst.CurrentNode = edge.To
-	e.Run(def, inst)
+	e.completeWait(def, inst)
 	return nil
 }
 

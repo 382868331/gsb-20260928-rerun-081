@@ -157,6 +157,52 @@ export function Editor({ definitions, onPublish, status, loadError, onRetryLoad 
                 {nodes.filter((n) => n.type === "task").map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
               </select>
             </label>
+            {selectedNode.type === "wait" && (
+              <fieldset className="wait-props">
+                <legend>协作等待（多方输入）</legend>
+                <label>参与方（逗号分隔；留空则为单人等待）
+                  <input
+                    value={(selectedNode.participants || []).join(",")}
+                    placeholder="alice,bob,carol"
+                    onChange={(e) =>
+                      updateNode({
+                        participants: e.target.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+                      })
+                    }
+                  />
+                </label>
+                {(selectedNode.participants || []).length > 0 && (
+                  <>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedNode.allowDelegate}
+                        onChange={(e) => updateNode({ allowDelegate: e.target.checked })}
+                      />
+                      允许参与方委托他人代为确认
+                    </label>
+                    <label>到期时间（秒，0 为不限）
+                      <input
+                        type="number"
+                        min={0}
+                        value={selectedNode.timeoutSeconds || 0}
+                        onChange={(e) => updateNode({ timeoutSeconds: Number(e.target.value) || 0 })}
+                      />
+                    </label>
+                    <label>到期后如何决定
+                      <select
+                        value={selectedNode.timeoutPolicy || "reject"}
+                        onChange={(e) => updateNode({ timeoutPolicy: e.target.value })}
+                      >
+                        <option value="reject">视为拒绝（进入失败补偿）</option>
+                        <option value="approve">视为通过（继续流程）</option>
+                      </select>
+                    </label>
+                    <span className="hint">需全部参与方确认后步骤才完成；部分输入只会记录，不会提前完成。</span>
+                  </>
+                )}
+              </fieldset>
+            )}
             <span className="hint" style={{ color: nodeColor(selectedNode.type) }}>类型：{TYPE_LABEL[selectedNode.type]}</span>
           </div>
         )}

@@ -30,6 +30,18 @@ type Node struct {
 	CompensateTo string   `json:"compensateTo,omitempty"` // node id used to undo this task on failure
 	X            int      `json:"x"`
 	Y            int      `json:"y"`
+
+	// Collaborative wait configuration (only meaningful for wait nodes).
+	// When Participants is non-empty the wait step needs one confirmation
+	// from every effective participant before it can complete; partial
+	// input never finishes the step early.
+	Participants   []string `json:"participants,omitempty"`
+	AllowDelegate  bool     `json:"allowDelegate,omitempty"`
+	TimeoutSeconds int64    `json:"timeoutSeconds,omitempty"`
+	// TimeoutPolicy decides the outcome once the deadline passes:
+	// "approve" completes the step, anything else (default) rejects it and
+	// the wait fails into compensation.
+	TimeoutPolicy string `json:"timeoutPolicy,omitempty"`
 }
 
 // Definition is an immutable published version of a process.
@@ -99,6 +111,11 @@ type Instance struct {
 	// histories of two versions are never spliced together.
 	DefinitionHistory []DefinitionRef `json:"definitionHistory,omitempty"`
 
+	// Wait is the live collaborative-wait state, present only while the
+	// instance waits at a multi-party wait node. Persisted with the instance
+	// so a restart keeps waiting with every confirmation intact.
+	Wait *WaitState `json:"wait,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -113,6 +130,45 @@ type DefinitionRef struct {
 
 type ExternalInput struct {
 	WaitNode string         `json:"waitNode"`
-	Key      string         `json:"key"` // client-chosen idempotency key
+	Key      string         `json:"key"`            // client-chosen idempotency key
+	From     string         `json:"from,omitempty"` // participant id for collaborative waits
 	Payload  map[string]any `json:"payload"`
+}
+
+// PartyInput is one confirmed participant input on a collaborative wait.
+// AuthID ties it to the authorization scope that was in effect when the
+// input was accepted, so a later decision is traceable to that scope.
+type PartyInput struct {
+	Key     string         `json:"key"`
+	From    string         `json:"from"`
+	Payload map[string]any `json:"payload,omitempty"`
+	AuthID  string         `json:"authId"`
+	At      time.Time      `json:"at"`
+}
+
+// WaitAuthorization is one version of the acceptance scope of a
+// collaborative wait: who may confirm, and whether delegation is allowed.
+// Every scope change appends a new record; old ones are never rewritten.
+type WaitAuthorization struct {
+	ID            string            `json:"id"`
+	Participants  []string          `json:"participants"`
+	AllowDelegate bool              `json:"allowDelegate"`
+	Delegations   map[string]string `json:"delegations,omitempty"` // participant -> delegate
+	Since         time.Time         `json:"since"`
+	Reason        string            `json:"reason,omitempty"`
+	// PriorInputsKept records whether inputs accepted under earlier
+	// authorizations remained valid when this scope took effect.
+	PriorInputsKept bool `json:"priorInputsKept"`
+}
+
+// WaitState is the durable state of an in-progress collaborative wait.
+// It survives save/restart so confirmations are never re-executed.
+type WaitState struct {
+	AuthID         string                `json:"authId"`
+	Received       map[string]PartyInput `json:"received"`       // effective participant -> confirmation
+	Authorizations []WaitAuthorization   `json:"authorizations"` // full history, last is current
+	Deadline       *time.Time            `json:"deadline,omitempty"`
+	Decided        bool                  `json:"decided,omitempty"`
+	Decision       string                `json:"decision,omitempty"`       // approved | rejected | timeout_approved | timeout_rejected
+	DecisionAuthID string                `json:"decisionAuthId,omitempty"` // scope in effect at decision time
 }

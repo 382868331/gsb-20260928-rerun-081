@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"flowplatform/internal/api"
@@ -346,5 +347,73 @@ func TestHTTPWaitingMigrationPreviewAndConfirm(t *testing.T) {
 	}
 	if counts["t"] != 1 || counts["t2"] != 1 {
 		t.Fatalf("新旧版本步骤各只能执行一次: %v", counts)
+	}
+}
+
+func TestEmptyListsReturnEmptyArrays(t *testing.T) {
+	h, _ := setup(t, filepath.Join(t.TempDir(), "data"))
+	for _, path := range []string{"/api/definitions", "/api/instances"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: got %d", path, w.Code)
+		}
+		if strings.TrimSpace(w.Body.String()) != "[]" {
+			t.Fatalf("%s: 空数据必须返回 [] 而不是 null, got %s", path, w.Body.String())
+		}
+	}
+}
+
+func TestHTTPCollaborativeWaitFlow(t *testing.T) {
+	h, _ := setup(t, filepath.Join(t.TempDir(), "data"))
+	nodes := []model.Node{
+		{ID: "start", Type: model.NodeStart, Name: "开始"},
+		{ID: "sign", Type: model.NodeWait, Name: "会签", Participants: []string{"a", "b"}, AllowDelegate: true},
+		{ID: "end", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{
+		{ID: "e1", From: "start", To: "sign"},
+		{ID: "e2", From: "sign", To: "end"},
+	}
+	var def model.Definition
+	if c := do(t, h, "POST", "/api/definitions", map[string]any{"name": "collab", "nodes": nodes, "edges": edges}, &def); c != 201 {
+		t.Fatalf("publish: %d", c)
+	}
+	var inst model.Instance
+	if c := do(t, h, "POST", "/api/instances", map[string]any{"definitionId": def.ID, "data": map[string]any{}}, &inst); c != 201 {
+		t.Fatalf("start: %d", c)
+	}
+	if inst.Wait == nil || inst.Status != model.StatusWaiting {
+		t.Fatal("应进入协作等待")
+	}
+	// Partial input: still waiting.
+	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{"waitNode": "sign", "key": "k1", "from": "a"}, &inst); c != 200 {
+		t.Fatalf("input a: %d", c)
+	}
+	if inst.Status != model.StatusWaiting {
+		t.Fatal("部分输入不能完成步骤")
+	}
+	// Delegate b -> c, then c confirms.
+	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/wait/scope", map[string]any{
+		"grantDelegations": map[string]string{"b": "c"}, "keepPriorInputs": true, "reason": "b 委托 c",
+	}, &inst); c != 200 {
+		t.Fatalf("scope: %d", c)
+	}
+	if len(inst.Wait.Authorizations) != 2 {
+		t.Fatal("新旧授权记录都应保留")
+	}
+	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{"waitNode": "sign", "key": "k2", "from": "c"}, &inst); c != 200 {
+		t.Fatalf("input c: %d", c)
+	}
+	if inst.Status != model.StatusCompleted || inst.Wait.DecisionAuthID != "auth-2" {
+		t.Fatalf("应按当时有效范围完成, got %s/%s", inst.Status, inst.Wait.DecisionAuthID)
+	}
+	// Timeout endpoint after completion is a no-op.
+	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/timeout", nil, &inst); c != 200 {
+		t.Fatalf("timeout: %d", c)
+	}
+	if inst.Status != model.StatusCompleted {
+		t.Fatal("已有决定后超时判定不得改变结果")
 	}
 }

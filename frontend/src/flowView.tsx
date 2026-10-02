@@ -25,10 +25,12 @@ export function definitionToFlow(def: Pick<Definition, "nodes" | "edges">): {
   nodes: Node[];
   edges: Edge[];
 } {
-  const nodes: Node[] = def.nodes.map((n) => ({
+  // Tolerate partially-loaded or legacy definitions: a missing nodes/edges
+  // array must never take the whole page down.
+  const nodes: Node[] = (def.nodes ?? []).map((n) => ({
     id: n.id,
     position: { x: n.x, y: n.y },
-    data: { label: n.name + "\n[" + TYPE_LABEL[n.type] + "]" },
+    data: { label: n.name + "\n[" + (TYPE_LABEL[n.type] || n.type) + "]" },
     draggable: false,
     selectable: false,
     style: {
@@ -41,7 +43,7 @@ export function definitionToFlow(def: Pick<Definition, "nodes" | "edges">): {
       textAlign: "center"
     }
   }));
-  const edges: Edge[] = def.edges.map((e) => ({
+  const edges: Edge[] = (def.edges ?? []).map((e) => ({
     id: e.id,
     source: e.from,
     target: e.to,

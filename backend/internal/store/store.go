@@ -143,7 +143,7 @@ func (s *Store) listDefsLocked() ([]model.Definition, error) {
 	if err != nil {
 		return nil, err
 	}
-	var defs []model.Definition
+	defs := []model.Definition{}
 	for _, en := range entries {
 		if filepath.Ext(en.Name()) != ".json" {
 			continue
@@ -247,7 +247,7 @@ func (s *Store) ListInstances() ([]model.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
-	var list []model.Instance
+	list := []model.Instance{}
 	for _, en := range entries {
 		if filepath.Ext(en.Name()) != ".json" {
 			continue
