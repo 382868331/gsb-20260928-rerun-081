@@ -4,7 +4,20 @@ export const templateNodes: FlowNode[] = [
   { id: "start", type: "start", name: "开始下单", x: 40, y: 180 },
   { id: "check", type: "decision", name: "金额判断", x: 260, y: 180 },
   { id: "reserve", type: "task", name: "预占库存", compensateTo: "reserve", x: 500, y: 80 },
-  { id: "manual", type: "wait", name: "等待人工确认", x: 740, y: 80 },
+  {
+    id: "manual",
+    type: "wait",
+    name: "等待多方会签",
+    x: 740,
+    y: 80,
+    collab: {
+      participants: ["reviewer", "manager"],
+      delegatable: true,
+      deadlineSeconds: 0,
+      timeoutPolicy: "reject",
+      approveThreshold: 0
+    }
+  },
   { id: "ship", type: "task", name: "发货", compensateTo: "ship", x: 980, y: 80 },
   { id: "directEnd", type: "end", name: "小额直接结束", x: 520, y: 300 },
   { id: "end", type: "end", name: "订单完成", x: 1220, y: 80 }

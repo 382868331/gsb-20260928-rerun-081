@@ -63,6 +63,9 @@ func (s *Server) listProcesses(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	if latest == nil {
+		latest = map[string]model.Definition{}
+	}
 	writeJSON(w, http.StatusOK, latest)
 }
 
@@ -95,6 +98,9 @@ func (s *Server) listDefs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	if defs == nil {
+		defs = []model.Definition{}
 	}
 	writeJSON(w, http.StatusOK, defs)
 }
@@ -177,6 +183,9 @@ func (s *Server) listInstances(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	if list == nil {
+		list = []model.Instance{}
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -203,6 +212,14 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.deliverInput(w, r, id)
 		return
 	}
+	if len(parts) >= 3 && parts[1] == "collab" && r.Method == http.MethodPost {
+		action := parts[2]
+		if len(parts) == 4 && parts[2] == "scope" {
+			action = "scope_" + parts[3]
+		}
+		s.collabAction(w, r, id, action)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "resume" && r.Method == http.MethodPost {
 		s.resumeInstance(w, r, id)
 		return
@@ -216,6 +233,57 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeErr(w, http.StatusNotFound, errMissing("route"))
+}
+
+func (s *Server) collabAction(w http.ResponseWriter, r *http.Request, id, action string) {
+	var req model.GrantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.WaitNode == "" {
+		writeErr(w, http.StatusBadRequest, errMissing("waitNode"))
+		return
+	}
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	// Resolve any due deadline under the same instance lock first, so an
+	// authorization change and a timeout cannot race into two decisions.
+	s.engine.CheckTimeouts(def, inst)
+	switch action {
+	case "delegate":
+		err = s.engine.GrantDelegate(def, inst, req)
+	case "revoke":
+		err = s.engine.RevokeDelegate(def, inst, req)
+	case "scope_add":
+		err = s.engine.ChangeScope(def, inst, true, req)
+	case "scope_remove":
+		err = s.engine.ChangeScope(def, inst, false, req)
+	case "timeout":
+		err = s.engine.ForceTimeout(def, inst, req.WaitNode)
+	default:
+		writeErr(w, http.StatusNotFound, errMissing("collab action: delegate/revoke/scope/add/scope/remove/timeout"))
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
 }
 
 func (s *Server) deliverInput(w http.ResponseWriter, r *http.Request, id string) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -143,7 +144,7 @@ func (s *Store) listDefsLocked() ([]model.Definition, error) {
 	if err != nil {
 		return nil, err
 	}
-	var defs []model.Definition
+	defs := []model.Definition{}
 	for _, en := range entries {
 		if filepath.Ext(en.Name()) != ".json" {
 			continue
@@ -247,7 +248,7 @@ func (s *Store) ListInstances() ([]model.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
-	var list []model.Instance
+	list := []model.Instance{}
 	for _, en := range entries {
 		if filepath.Ext(en.Name()) != ".json" {
 			continue
@@ -300,6 +301,30 @@ func validateGraph(nodes []model.Node, edges []model.Edge) error {
 			starts++
 		case model.NodeEnd:
 			ends++
+		case model.NodeWait:
+			if c := n.Collab; c != nil {
+				if len(c.Participants) == 0 {
+					return fmt.Errorf("协作等待节点 %s 至少需要一个参与方", n.ID)
+				}
+				seen := map[string]bool{}
+				for _, p := range c.Participants {
+					if strings.TrimSpace(p) == "" {
+						return fmt.Errorf("协作等待节点 %s 存在空参与方", n.ID)
+					}
+					if seen[p] {
+						return fmt.Errorf("协作等待节点 %s 的参与方 %s 重复", n.ID, p)
+					}
+					seen[p] = true
+				}
+				switch c.TimeoutPolicy {
+				case "", model.TimeoutReject, model.TimeoutApprove, model.TimeoutMajority:
+				default:
+					return fmt.Errorf("协作等待节点 %s 的到期策略无效: %s", n.ID, c.TimeoutPolicy)
+				}
+				if c.ApproveThreshold < 0 || c.ApproveThreshold > len(c.Participants) {
+					return fmt.Errorf("协作等待节点 %s 的通过票数必须在 0..%d 之间", n.ID, len(c.Participants))
+				}
+			}
 		}
 	}
 	if starts != 1 {

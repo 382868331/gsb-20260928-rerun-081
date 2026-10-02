@@ -1,4 +1,4 @@
-import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview } from "./types";
+import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview, VoteKind } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -12,27 +12,60 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function asArray<T>(v: T[] | null | undefined): T[] {
+  return Array.isArray(v) ? v : [];
+}
+
+function normalizeDefinition(d: Definition): Definition {
+  return { ...d, nodes: asArray(d.nodes), edges: asArray(d.edges) };
+}
+
+function normalizeInstance(i: Instance): Instance {
+  return { ...i, records: asArray(i.records), data: i.data || {} };
+}
+
 export const api = {
-  listDefinitions: () => req<Definition[]>("/api/definitions"),
+  listDefinitions: async (): Promise<Definition[]> => {
+    const list = (await req<Definition[] | null>("/api/definitions")) || [];
+    return asArray(list).map(normalizeDefinition);
+  },
   publish: (name: string, nodes: FlowNode[], edges: FlowEdge[]) =>
     req<Definition>("/api/definitions", {
       method: "POST",
       body: JSON.stringify({ name, nodes, edges })
     }),
-  getDefinition: (id: string) => req<Definition>("/api/definitions/" + id),
-  listInstances: () => req<Instance[]>("/api/instances"),
+  getDefinition: async (id: string) => normalizeDefinition(await req<Definition>("/api/definitions/" + id)),
+  listInstances: async (): Promise<Instance[]> => {
+    const list = (await req<Instance[] | null>("/api/instances")) || [];
+    return asArray(list).map(normalizeInstance);
+  },
   startInstance: (definitionId: string, data: Record<string, unknown>, name?: string) =>
     req<Instance>("/api/instances", {
       method: "POST",
       body: JSON.stringify({ definitionId, data, name })
     }),
-  getInstance: (id: string) =>
-    req<{ instance: Instance; definition: Definition }>("/api/instances/" + id),
+  getInstance: async (id: string) => {
+    const v = await req<{ instance: Instance; definition: Definition }>("/api/instances/" + id);
+    return { instance: normalizeInstance(v.instance), definition: normalizeDefinition(v.definition) };
+  },
   deliverInput: (id: string, waitNode: string, key: string, payload: Record<string, unknown>) =>
+	    req<Instance>("/api/instances/" + id + "/inputs", {
+	      method: "POST",
+	      body: JSON.stringify({ waitNode, key, payload })
+	    }),
+  deliverCollabVote: (id: string, waitNode: string, key: string, voter: string, kind: VoteKind) =>
     req<Instance>("/api/instances/" + id + "/inputs", {
       method: "POST",
-      body: JSON.stringify({ waitNode, key, payload })
+      body: JSON.stringify({ waitNode, key, voter, kind, payload: {} })
     }),
+  collabDelegate: (id: string, body: { waitNode: string; actor: string; party: string }) =>
+    req<Instance>(`/api/instances/${id}/collab/delegate`, { method: "POST", body: JSON.stringify(body) }),
+  collabRevoke: (id: string, body: { waitNode: string; actor: string; party: string; keepPriorInputs: boolean }) =>
+    req<Instance>(`/api/instances/${id}/collab/revoke`, { method: "POST", body: JSON.stringify(body) }),
+  collabScope: (id: string, add: boolean, body: { waitNode: string; actor: string; party: string; keepPriorInputs?: boolean }) =>
+    req<Instance>(`/api/instances/${id}/collab/scope/${add ? "add" : "remove"}`, { method: "POST", body: JSON.stringify(body) }),
+  collabTimeout: (id: string, waitNode: string) =>
+    req<Instance>(`/api/instances/${id}/collab/timeout`, { method: "POST", body: JSON.stringify({ waitNode }) }),
   resumeInstance: (id: string) =>
     req<Instance>("/api/instances/" + id + "/resume", { method: "POST" })
   ,

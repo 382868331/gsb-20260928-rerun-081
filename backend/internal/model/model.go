@@ -28,8 +28,109 @@ type Node struct {
 	Type         NodeType `json:"type"`
 	Name         string   `json:"name"`
 	CompensateTo string   `json:"compensateTo,omitempty"` // node id used to undo this task on failure
-	X            int      `json:"x"`
-	Y            int      `json:"y"`
+	// Collab configures a wait node as a multi-party collaborative step.
+	// Nil/omitted means the classic single external-input wait.
+	Collab *CollabSpec `json:"collab,omitempty"`
+	X      int         `json:"x"`
+	Y      int         `json:"y"`
+}
+
+// TimeoutPolicy decides a collaborative wait when its deadline is reached.
+type TimeoutPolicy string
+
+const (
+	// TimeoutReject: decision is rejected unless enough approvals arrived.
+	TimeoutReject TimeoutPolicy = "reject"
+	// TimeoutApprove: decision is approved automatically on deadline.
+	TimeoutApprove TimeoutPolicy = "approve"
+	// TimeoutMajority: side with the majority of votes received by deadline;
+	// ties reject.
+	TimeoutMajority TimeoutPolicy = "majority"
+)
+
+// CollabSpec declares who must take part in a collaborative wait step,
+// whether delegation is allowed, and how the deadline is resolved.
+type CollabSpec struct {
+	Participants []string `json:"participants"`
+	Delegatable  bool     `json:"delegatable"`
+	// DeadlineSeconds is measured from the moment the instance enters the
+	// wait node. Zero means no deadline (the step can only finish by votes).
+	DeadlineSeconds int           `json:"deadlineSeconds,omitempty"`
+	TimeoutPolicy   TimeoutPolicy `json:"timeoutPolicy,omitempty"`
+	// ApproveThreshold is how many approvals are required to approve.
+	// 0 means every participant then in scope must approve (unanimous).
+	ApproveThreshold int `json:"approveThreshold,omitempty"`
+}
+
+// VoteKind is one participant's stance.
+type VoteKind string
+
+const (
+	VoteApprove VoteKind = "approve"
+	VoteReject  VoteKind = "reject"
+)
+
+// CollabVote is one effective or invalidated party input.
+type CollabVote struct {
+	Key           string    `json:"key"` // idempotency key
+	Voter         string    `json:"voter"`
+	OnBehalfOf    string    `json:"onBehalfOf,omitempty"` // original participant when cast by a delegate
+	Kind          VoteKind  `json:"kind"`
+	ViaGrantID    string    `json:"viaGrantId,omitempty"` // grant under which a delegate voted
+	Valid         bool      `json:"valid"`
+	InvalidReason string    `json:"invalidReason,omitempty"`
+	At            time.Time `json:"at"`
+}
+
+// GrantAction mutates the set of parties allowed to act.
+type GrantAction string
+
+const (
+	GrantDelegate    GrantAction = "delegate" // participant adds a delegate
+	GrantRevoke      GrantAction = "revoke"   // participant withdraws a delegation
+	GrantScopeAdd    GrantAction = "scope_add"
+	GrantScopeRemove GrantAction = "scope_remove"
+)
+
+// GrantRecord is an append-only authorization-history entry. Old and new
+// records are both kept forever so any later decision can be traced to the
+// party scope that was effective at that time.
+type GrantRecord struct {
+	Seq    int         `json:"seq"`
+	Action GrantAction `json:"action"`
+	Actor  string      `json:"actor"`           // participant/owner performing the change
+	Party  string      `json:"party,omitempty"` // delegate or added/removed participant
+	// KeepPriorInputs says whether inputs given before this change remain
+	// valid. Revocation/scope removal records it explicitly.
+	KeepPriorInputs bool      `json:"keepPriorInputs"`
+	Note            string    `json:"note,omitempty"`
+	At              time.Time `json:"at"`
+}
+
+// CollabDecision is the single definitive outcome of a collaborative wait.
+type CollabDecision struct {
+	Outcome    string `json:"outcome"` // approved / rejected / timeout_approved / timeout_rejected
+	Reason     string `json:"reason"`
+	Approvals  int    `json:"approvals"`
+	Rejections int    `json:"rejections"`
+	Threshold  int    `json:"threshold"`
+	// ScopeSnapshot is the exact set of participants whose votes were counted,
+	// i.e. the scope effective when the decision was made.
+	ScopeSnapshot []string  `json:"scopeSnapshot"`
+	At            time.Time `json:"at"`
+}
+
+// CollabState is the persisted runtime state of one collaborative wait.
+type CollabState struct {
+	WaitNode string `json:"waitNode"`
+	// Scope is the currently effective participant set (initial spec plus
+	// scope mutations). Delegates are not stored here; they live in Grants.
+	Scope    []string        `json:"scope"`
+	Votes    []CollabVote    `json:"votes"`
+	Grants   []GrantRecord   `json:"grants"`
+	Deadline *time.Time      `json:"deadline,omitempty"`
+	Decision *CollabDecision `json:"decision,omitempty"`
+	Decided  bool            `json:"decided"`
 }
 
 // Definition is an immutable published version of a process.
@@ -99,6 +200,11 @@ type Instance struct {
 	// histories of two versions are never spliced together.
 	DefinitionHistory []DefinitionRef `json:"definitionHistory,omitempty"`
 
+	// Collabs holds runtime state per collaborative wait node, keyed by node
+	// id. State of finished waits is retained so later (late) inputs can be
+	// attached as history and decisions remain traceable after restart.
+	Collabs map[string]*CollabState `json:"collabs,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -115,4 +221,19 @@ type ExternalInput struct {
 	WaitNode string         `json:"waitNode"`
 	Key      string         `json:"key"` // client-chosen idempotency key
 	Payload  map[string]any `json:"payload"`
+	// Collaborative-wait fields (ignored by classic waits):
+	Voter string   `json:"voter,omitempty"` // participant or delegate submitting
+	Kind  VoteKind `json:"kind,omitempty"`  // approve / reject
+}
+
+// GrantRequest delegates, revokes, or changes the receiving scope of a
+// collaborative wait while it is pending.
+type GrantRequest struct {
+	WaitNode string `json:"waitNode"`
+	Actor    string `json:"actor"`
+	Party    string `json:"party"`
+	// KeepPriorInputs states whether votes already given stay valid after the
+	// change. Defaults to true.
+	KeepPriorInputs *bool  `json:"keepPriorInputs,omitempty"`
+	Note            string `json:"note,omitempty"`
 }

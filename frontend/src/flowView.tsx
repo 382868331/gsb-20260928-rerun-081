@@ -25,10 +25,12 @@ export function definitionToFlow(def: Pick<Definition, "nodes" | "edges">): {
   nodes: Node[];
   edges: Edge[];
 } {
-  const nodes: Node[] = def.nodes.map((n) => ({
+  const safeNodes = Array.isArray(def.nodes) ? def.nodes : [];
+  const safeEdges = Array.isArray(def.edges) ? def.edges : [];
+  const nodes: Node[] = safeNodes.map((n) => ({
     id: n.id,
     position: { x: n.x, y: n.y },
-    data: { label: n.name + "\n[" + TYPE_LABEL[n.type] + "]" },
+    data: { label: n.name + "\n[" + TYPE_LABEL[n.type] + (n.type === "wait" && n.collab ? "·多方" : "") + "]" },
     draggable: false,
     selectable: false,
     style: {
@@ -41,7 +43,7 @@ export function definitionToFlow(def: Pick<Definition, "nodes" | "edges">): {
       textAlign: "center"
     }
   }));
-  const edges: Edge[] = def.edges.map((e) => ({
+  const edges: Edge[] = safeEdges.map((e) => ({
     id: e.id,
     source: e.from,
     target: e.to,

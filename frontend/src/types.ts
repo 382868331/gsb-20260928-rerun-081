@@ -5,8 +5,62 @@ export interface FlowNode {
   type: NodeType;
   name: string;
   compensateTo?: string;
+  collab?: CollabSpec | null;
   x: number;
   y: number;
+}
+
+export type TimeoutPolicy = "reject" | "approve" | "majority";
+
+export interface CollabSpec {
+  participants: string[];
+  delegatable: boolean;
+  deadlineSeconds?: number;
+  timeoutPolicy?: TimeoutPolicy;
+  approveThreshold?: number;
+}
+
+export type VoteKind = "approve" | "reject";
+
+export interface CollabVote {
+  key: string;
+  voter: string;
+  onBehalfOf?: string;
+  kind: VoteKind;
+  viaGrantId?: string;
+  valid: boolean;
+  invalidReason?: string;
+  at: string;
+}
+
+export interface GrantRecord {
+  seq: number;
+  action: "delegate" | "revoke" | "scope_add" | "scope_remove";
+  actor: string;
+  party?: string;
+  keepPriorInputs: boolean;
+  note?: string;
+  at: string;
+}
+
+export interface CollabDecision {
+  outcome: string;
+  reason: string;
+  approvals: number;
+  rejections: number;
+  threshold: number;
+  scopeSnapshot: string[];
+  at: string;
+}
+
+export interface CollabState {
+  waitNode: string;
+  scope: string[];
+  votes: CollabVote[];
+  grants: GrantRecord[];
+  deadline?: string;
+  decision?: CollabDecision;
+  decided: boolean;
 }
 
 export interface FlowEdge {
@@ -79,6 +133,7 @@ export interface Instance {
   failedNode?: string;
   compensatedNodes?: Record<string, boolean>;
   definitionHistory?: { definitionId: string; name: string; version: number; since: string }[];
+  collabs?: Record<string, CollabState>;
   createdAt: string;
   updatedAt: string;
 }

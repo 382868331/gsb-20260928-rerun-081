@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ReactFlow, ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { Definition, FlowNode, NodeType } from "../types";
+import type { CollabSpec, Definition, FlowNode, NodeType, TimeoutPolicy } from "../types";
 import { templateEdges, templateNodes } from "../template";
 import { TYPE_LABEL, definitionToFlow, nodeColor } from "../flowView";
 
@@ -14,6 +14,69 @@ interface Props {
 }
 
 let counter = 100;
+
+function CollabEditor({
+  value,
+  onChange,
+  parseParticipants
+}: {
+  value: CollabSpec;
+  onChange: (next: CollabSpec) => void;
+  parseParticipants: (text: string) => string[];
+}) {
+  const [text, setText] = useState(value.participants.join(", "));
+  const policies: { id: TimeoutPolicy; label: string }[] = [
+    { id: "reject", label: "到期未达通过票数则拒绝" },
+    { id: "approve", label: "到期自动通过" },
+    { id: "majority", label: "到期按多数票（平票拒绝）" }
+  ];
+  return (
+    <div className="collab-fields">
+      <label>参与方（逗号/空格/换行分隔）
+        <textarea
+          rows={2}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            onChange({ ...value, participants: parseParticipants(e.target.value) });
+          }}
+        />
+      </label>
+      <label className="check-line">
+        <input
+          type="checkbox"
+          checked={value.delegatable}
+          onChange={(e) => onChange({ ...value, delegatable: e.target.checked })}
+        />
+        允许参与方委托他人（可在等待期间撤回，撤回时可声明此前输入是否有效）
+      </label>
+      <label>通过所需赞成票数（0 = 全体一致）
+        <input
+          type="number"
+          min={0}
+          value={value.approveThreshold ?? 0}
+          onChange={(e) => onChange({ ...value, approveThreshold: Number(e.target.value) || 0 })}
+        />
+      </label>
+      <label>到期秒数（0 = 不设到期，只能由各方意见决定）
+        <input
+          type="number"
+          min={0}
+          value={value.deadlineSeconds ?? 0}
+          onChange={(e) => onChange({ ...value, deadlineSeconds: Number(e.target.value) || 0 })}
+        />
+      </label>
+      <label>到期后如何决定
+        <select value={value.timeoutPolicy || "reject"} onChange={(e) => onChange({ ...value, timeoutPolicy: e.target.value as TimeoutPolicy })}>
+          {policies.map((p) => (
+            <option key={p.id} value={p.id}>{p.label}</option>
+          ))}
+        </select>
+      </label>
+      <p className="hint">部分参与方输入到达时步骤不会完成；决定会记录当时有效的参与范围与完整授权历史。</p>
+    </div>
+  );
+}
 const DRAFT_KEY = "flowplatform.editor.draft.v1";
 
 interface Draft {
@@ -28,6 +91,7 @@ function loadDraft(): Draft | null {
     if (!raw) return null;
     const d = JSON.parse(raw) as Draft;
     if (!Array.isArray(d.nodes) || d.nodes.length === 0) return null;
+    if (!Array.isArray(d.edges)) d.edges = [];
     return d;
   } catch {
     return null;
@@ -79,6 +143,18 @@ export function Editor({ definitions, onPublish, status, loadError, onRetryLoad 
     setNodes((prev) => prev.map((n) => (n.id === selectedNode.id ? { ...n, ...patch } : n)));
   }
 
+  const selectedIsWait = selectedNode?.type === "wait";
+  const collab = selectedNode?.collab || null;
+
+  function updateCollab(next: CollabSpec | null) {
+    if (!selectedNode) return;
+    updateNode({ collab: next });
+  }
+
+  function parseParticipants(text: string): string[] {
+    return text.split(/[,，\n;；\s]+/).map((s) => s.trim()).filter(Boolean);
+  }
+
   function addEdge() {
     if (!from || !to || from === to) {
       setError("请选择不同的起点和终点");
@@ -94,10 +170,12 @@ export function Editor({ definitions, onPublish, status, loadError, onRetryLoad 
   }
 
   function loadVersion(d: Definition) {
-    setName(d.name);
-    setNodes(d.nodes.map((n) => ({ ...n })));
-    setEdges(d.edges.map((e) => ({ ...e })));
-    setSelected(d.nodes[0]?.id ?? null);
+    const safeNodes = Array.isArray(d.nodes) ? d.nodes : [];
+    const safeEdges = Array.isArray(d.edges) ? d.edges : [];
+    setName(d.name || "order-demo");
+    setNodes(safeNodes.map((n) => ({ ...n })));
+    setEdges(safeEdges.map((e) => ({ ...e })));
+    setSelected(safeNodes[0]?.id ?? null);
     setError("");
   }
 
@@ -158,6 +236,29 @@ export function Editor({ definitions, onPublish, status, loadError, onRetryLoad 
               </select>
             </label>
             <span className="hint" style={{ color: nodeColor(selectedNode.type) }}>类型：{TYPE_LABEL[selectedNode.type]}</span>
+          </div>
+        )}
+
+        {selectedIsWait && (
+          <div className="collab-config">
+            <h3>多方协作设置</h3>
+            <label className="check-line">
+              <input
+                type="checkbox"
+                checked={!!collab}
+                onChange={(e) =>
+                  updateCollab(
+                    e.target.checked
+                      ? { participants: ["alice", "bob"], delegatable: false, deadlineSeconds: 0, timeoutPolicy: "reject", approveThreshold: 0 }
+                      : null
+                  )
+                }
+              />
+              该等待需要多方参与（部分到达不提前完成）
+            </label>
+            {collab && (
+              <CollabEditor value={collab} onChange={updateCollab} parseParticipants={parseParticipants} />
+            )}
           </div>
         )}
 

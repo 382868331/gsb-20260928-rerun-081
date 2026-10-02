@@ -15,6 +15,14 @@ Go 流程引擎 + React 流程编辑器。第一轮交付：
 - 崩溃安全：任务成功后、补偿进行中被保存/重启，已完成的任务与补偿都不会再执行第二次（前向去重 + 补偿日志即时落盘 + 实例级锁防止重复输入并发提交）
 - 画布中的绿色箭头只来自执行记录 `records` 里真实经过的 `edgeId`（branch/traverse），不是动画推断；前端带错误边界，局部渲染异常不再整页白屏
 
+第二轮追加：
+
+- **定义加载三态**：空定义返回 `[]`（后端空切片不再序列化为 `null`），前端对列表/nodes/edges 全部做数组归一化；空数据、加载失败（可重试，本地草稿仍可继续编辑/发布）、已有定义分别呈现，不再出现 “not iterable” 白屏
+- **多方协作等待步骤**（wait 节点可开启 collab）：定义参与方、是否允许委托、通过所需赞成票数、到期秒数与到期策略（拒绝/自动通过/多数票平票拒绝）；只有部分输入到达时步骤绝不提前完成
+- 等待期间可委托、撤回委托、扩大/缩小接收范围；撤回或移除时显式声明此前输入是否仍有效——声明失效的旧票只作历史保留、不再计数；每一次授权变更都形成 append-only 授权记录，新旧记录都保留
+- 重复参与方意见、重复幂等键、撤回与到期并发到达时只形成一个明确决定（实例级锁 + 每次操作前先结算到期）；决定之后（含失败补偿期间）到达的输入仅记录为历史，不覆盖数据、不重做动作
+- **保存重开后续等**：协作状态（票数/授权/截止时间/决定）随实例 JSON 落盘；重启后未到期继续等待、已确认不重复执行，已到期自动按策略形成决定；每个决定都带 scopeSnapshot，可追溯当时有效的参与范围与授权链路（受托人投票记录 onBehalfOf 与 viaGrantId）
+
 ## 目录
 
 - `backend/` Go 服务：`model`（定义/实例/执行记录）、`engine`（执行/条件/补偿）、`store`（JSON 持久化）、`api`（HTTP）
@@ -52,6 +60,11 @@ cd ../backend && go run ./cmd/server -static ../frontend/dist
 - `POST /api/instances` 启动 `{definitionId, data}`（运行到等待/结束/失败后落盘）
 - `GET  /api/instances` / `GET /api/instances/{id}`（返回实例 + 其固定版本定义）
 - `POST /api/instances/{id}/inputs` 人工输入 `{waitNode, key, payload}`
+- 协作等待投票同一端点：{waitNode, key, voter, kind: approve|reject}
+- `POST /api/instances/{id}/collab/delegate` {waitNode, actor, party}
+- `POST /api/instances/{id}/collab/revoke` {waitNode, actor, party, keepPriorInputs}
+- `POST /api/instances/{id}/collab/scope/add` 与 /scope/remove {waitNode, actor, party, keepPriorInputs?}
+- `POST /api/instances/{id}/collab/timeout` {waitNode} 立即按到期策略结算（也可等待真实到期/重启自动结算）
 - `POST /api/instances/{id}/resume` 重启后把 `running` 实例推进到下一个等待/结束/失败
 - `GET  /api/processes` 每个流程名的最新版本（空数据时返回 `{}`，前端据此引导发布）
 - `GET  /api/instances/{id}/migration?definitionId=...` 预览等待实例迁移到新版本后受影响的步骤

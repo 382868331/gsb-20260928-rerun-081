@@ -69,7 +69,7 @@ func recoverRunning(st *store.Store, eng *engine.Engine) {
 	}
 	for i := range list {
 		inst := &list[i]
-		if inst.Status != model.StatusRunning {
+		if inst.Status != model.StatusRunning && inst.Status != model.StatusWaiting {
 			continue
 		}
 		def, err := st.GetDefinition(inst.DefinitionID)

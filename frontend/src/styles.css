@@ -131,3 +131,27 @@ button.danger-confirm { background: #7c3aed; color: #fff; border-color: #7c3aed;
   display: flex; flex-direction: column; gap: 2px;
 }
 .summary-grid b { font-size: 13px; }
+
+.check-line { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; }
+.check-line input[type="checkbox"] { margin-top: 3px; }
+.collab-config { border: 1px solid #ddd6fe; background: #f5f3ff; border-radius: 8px; padding: 8px; margin: 8px 0; }
+.collab-fields { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.collab-fields textarea { font-family: inherit; }
+.collab-panel { border-top: 2px solid #7c3aed; margin-top: 10px; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.collab-tally { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tag { border-radius: 999px; padding: 1px 10px; font-size: 11px; background: #e2e8f0; }
+.tag.approve { background: #dcfce7; color: #15803d; }
+.tag.reject { background: #fee2e2; color: #b91c1c; }
+.collab-vote, .collab-grant, .collab-scope { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.collab-decision { border-radius: 8px; padding: 8px 10px; border: 2px solid; }
+.collab-decision.ok { border-color: #16a34a; background: #f0fdf4; }
+.collab-decision.no { border-color: #dc2626; background: #fef2f2; }
+.collab-votes, .collab-grants { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.collab-votes li, .collab-grants li { background: #f8fafc; border-radius: 6px; padding: 3px 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.collab-votes li.invalid { opacity: 0.65; text-decoration: none; background: #fefce8; }
+.ok { color: #15803d; }
+.no { color: #b91c1c; }
+.record-collab_wait { border-left-color: #7c3aed; background: #f5f3ff; }
+.record-collab_vote { border-left-color: #0d9488; background: #f0fdfa; }
+.record-collab_grant { border-left-color: #d97706; background: #fffbeb; }
+.record-collab_decided { border-left-color: #1d4ed8; background: #eff6ff; }

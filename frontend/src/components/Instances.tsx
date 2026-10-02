@@ -5,6 +5,7 @@ import { api } from "../api";
 import type { Definition, Instance, MigrationPreview, StepRecord } from "../types";
 import { applyExecution, definitionToFlow } from "../flowView";
 import { RecordList, STATUS_LABEL, stopLabel, consumedKeys } from "./RecordList";
+import { CollabPanel } from "./CollabPanel";
 
 interface Props {
   definitions: Definition[];
@@ -151,6 +152,10 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
     return m;
   }, [detail]);
 
+  const waitDef = detail?.definition.nodes.find((n) => n.id === detail.instance.waitNode) || null;
+  const collabSpec = waitDef?.type === "wait" ? waitDef.collab || null : null;
+  const collabState = detail?.instance.collabs?.[detail.instance.waitNode || ""] || null;
+
   return (
     <div className="instance-layout">
       <aside className="panel">
@@ -261,7 +266,25 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
 
       <aside className="panel records-panel">
         <h2>人工输入</h2>
-        {detail?.instance.status === "waiting" ? (
+        {detail?.instance.status === "waiting" && collabSpec ? (
+          collabState ? (
+            <CollabPanel
+              instance={detail.instance}
+              spec={collabSpec}
+              collab={collabState}
+              busy={busy}
+              setBusy={setBusy}
+              onNotice={setNotice}
+              onError={setError}
+              onChanged={async (inst) => {
+                await loadDetail(inst.id);
+                await loadList(inst.id);
+              }}
+            />
+          ) : (
+            <p className="hint">协作等待状态初始化中…</p>
+          )
+        ) : detail?.instance.status === "waiting" ? (
           <>
             <label>幂等键 key（相同 key 的重复 / 迟到提交只生效一次）
               <input value={inputKey} onChange={(e) => setInputKey(e.target.value)} placeholder="approve-001" />
@@ -284,6 +307,27 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
 
         <h3>已生效的输入 key</h3>
         <div className="consumed">{consumedKeys(detail?.instance).length ? consumedKeys(detail!.instance).map((k) => <span key={k} className="key-chip">{k}</span>) : <span className="hint">无</span>}</div>
+
+        {detail && Object.entries(detail.instance.collabs || {}).map(([nodeId, cs]) => {
+          // The active collaborative wait is rendered in the input area above.
+          if (detail.instance.status === "waiting" && nodeId === detail.instance.waitNode) return null;
+            const node = detail.definition.nodes.find((n) => n.id === nodeId);
+            const spec = node?.type === "wait" ? node.collab : null;
+            if (!spec) return null;
+            return (
+              <CollabPanel
+                key={nodeId}
+                instance={detail.instance}
+                spec={spec}
+                collab={cs}
+                busy={busy}
+                setBusy={setBusy}
+                onNotice={setNotice}
+                onError={setError}
+                onChanged={async (inst) => { await loadDetail(inst.id); await loadList(inst.id); }}
+              />
+            );
+          })}
 
         {detail?.instance.status === "waiting" && (
           <MigrationSection

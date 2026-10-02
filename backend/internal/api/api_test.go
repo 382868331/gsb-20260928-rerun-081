@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"flowplatform/internal/api"
@@ -346,5 +347,101 @@ func TestHTTPWaitingMigrationPreviewAndConfirm(t *testing.T) {
 	}
 	if counts["t"] != 1 || counts["t2"] != 1 {
 		t.Fatalf("新旧版本步骤各只能执行一次: %v", counts)
+	}
+}
+
+func TestHTTPEmptyListsReturnJSONArrays(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "empty")
+	h, _ := setup(t, dir)
+	for _, path := range []string{"/api/definitions", "/api/instances"} {
+		r := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("%s code=%d", path, w.Code)
+		}
+		// Must be an iterable JSON array, never null, or the UI whitescreens.
+		if strings.TrimSpace(w.Body.String()) != "[]" {
+			t.Fatalf("%s 空列表必须返回 [] 而非 null, got %q", path, w.Body.String())
+		}
+	}
+}
+
+func TestHTTPCollabWaitDelegationTimeoutAndLateInput(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "collab")
+	h, _ := setup(t, dir)
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "w", Type: model.NodeWait, Name: "会签", Collab: &model.CollabSpec{
+			Participants: []string{"alice", "bob"}, Delegatable: true,
+			DeadlineSeconds: 3600, TimeoutPolicy: model.TimeoutReject,
+		}},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{{ID: "a", From: "s", To: "w"}, {ID: "b", From: "w", To: "e"}}
+	var def model.Definition
+	do(t, h, "POST", "/api/definitions", map[string]any{"name": "p", "nodes": nodes, "edges": edges}, &def)
+	var inst model.Instance
+	do(t, h, "POST", "/api/instances", map[string]any{"definitionId": def.ID, "data": map[string]any{}}, &inst)
+	if inst.Status != model.StatusWaiting {
+		t.Fatalf("应等待, got %s", inst.Status)
+	}
+
+	// Partial vote: still waiting.
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{
+		"waitNode": "w", "key": "k-a", "voter": "alice", "kind": "approve", "payload": map[string]any{},
+	}, &inst)
+	if inst.Status != model.StatusWaiting {
+		t.Fatal("单方输入不得提前完成")
+	}
+
+	// alice delegates to dave; the new grant and its later revocation are both kept.
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/collab/delegate", map[string]any{
+		"waitNode": "w", "actor": "alice", "party": "dave",
+	}, &inst)
+	// dave votes on alice's behalf — it must be rejected because alice already voted.
+	var delegated model.Instance
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{
+		"waitNode": "w", "key": "k-d", "voter": "dave", "kind": "approve", "payload": map[string]any{},
+	}, &delegated); code != 200 {
+		t.Fatalf("重复参与方投票应 200 幂等忽略, got %d", code)
+	}
+	if delegated.Status != model.StatusWaiting {
+		t.Fatal("alice 已投票，受托人不能再投")
+	}
+
+	// bob rejects: unanimous threshold fails -> single rejection decision.
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{
+		"waitNode": "w", "key": "k-b", "voter": "bob", "kind": "reject", "payload": map[string]any{},
+	}, &inst)
+	if inst.Status != model.StatusCompleted {
+		t.Fatalf("全员投票后应形成决定并完成, got %s", inst.Status)
+	}
+	cs := inst.Collabs["w"]
+	if cs == nil || cs.Decision == nil || cs.Decision.Outcome != "rejected" {
+		t.Fatalf("决定应为 rejected, got %+v", cs)
+	}
+	if len(cs.Decision.ScopeSnapshot) != 2 {
+		t.Fatalf("决定应追溯当时参与范围, got %v", cs.Decision.ScopeSnapshot)
+	}
+	if len(cs.Grants) != 1 {
+		t.Fatalf("应保留授权记录, got %d", len(cs.Grants))
+	}
+
+	// Grant changes after the decision must be rejected; late votes only make history.
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/collab/scope/add", map[string]any{
+		"waitNode": "w", "actor": "admin", "party": "zoe",
+	}, nil); code != 400 {
+		t.Fatalf("决定后变更范围应被拒绝, got %d", code)
+	}
+	var late model.Instance
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{
+		"waitNode": "w", "key": "k-late", "voter": "bob", "kind": "approve", "payload": map[string]any{},
+	}, &late)
+	if late.Status != model.StatusCompleted {
+		t.Fatal("迟到输入不得改变状态")
+	}
+	if got := late.Collabs["w"].Decision.Outcome; got != "rejected" {
+		t.Fatalf("迟到输入不能产生第二个决定, got %s", got)
 	}
 }
