@@ -1,4 +1,4 @@
-import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview } from "./types";
+import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview, Reconsideration, ReconsiderProgress } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -70,4 +70,32 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ...target, confirm: true })
     })
+  ,
+  openReconsideration: (id: string, body: {
+    waitNode: string;
+    participants: string[];
+    allowDelegate?: boolean;
+    materials?: Record<string, unknown>;
+    reason?: string;
+    timeoutSeconds?: number;
+    timeoutPolicy?: string;
+  }) =>
+    req<{ reconsideration: Reconsideration; instance: Instance }>("/api/instances/" + id + "/reconsiderations", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  reconsiderVote: (id: string, rid: string, key: string, from: string, payload: Record<string, unknown>) =>
+    req<Instance>("/api/instances/" + id + "/reconsiderations/" + rid + "/inputs", {
+      method: "POST",
+      body: JSON.stringify({ key, from, payload })
+    }),
+  reconsiderScope: (id: string, rid: string, body: { revokeDelegations?: string[]; grantDelegations?: Record<string, string>; participants?: string[]; reason?: string }) =>
+    req<Instance>("/api/instances/" + id + "/reconsiderations/" + rid + "/scope", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  reconsiderTimeout: (id: string, rid: string) =>
+    req<Instance>("/api/instances/" + id + "/reconsiderations/" + rid + "/timeout", { method: "POST" }),
+  reconsiderProgress: (id: string, rid: string) =>
+    req<{ reconsideration: Reconsideration; progress: ReconsiderProgress }>("/api/instances/" + id + "/reconsiderations/" + rid)
 };

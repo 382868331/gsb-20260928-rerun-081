@@ -84,6 +84,9 @@ export interface Instance {
   compensatedNodes?: Record<string, boolean>;
   definitionHistory?: { definitionId: string; name: string; version: number; since: string }[];
   wait?: WaitState;
+  waitDecisions?: WaitDecision[];
+  reconsiderations?: Reconsideration[];
+  reconsidering?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -113,4 +116,46 @@ export interface WaitState {
   decided?: boolean;
   decision?: string;
   decisionAuthId?: string;
+}
+
+export interface WaitDecision {
+  nodeId: string;
+  decision: string;
+  authId: string;
+  seq: number;
+  at: string;
+}
+
+export interface Reconsideration {
+  id: string;
+  waitNode: string;
+  originDecision: string;
+  originAuthId: string;
+  originSeq: number;
+  participants: string[];
+  allowDelegate: boolean;
+  delegations?: Record<string, string>;
+  materials?: Record<string, unknown>;
+  reason?: string;
+  received: Record<string, PartyInput>;
+  deadline?: string;
+  timeoutPolicy?: string;
+  decided?: boolean;
+  decision?: string;
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface ReconsiderProgress {
+  reconsiderationId: string;
+  originWaitNode: string;
+  originDecision: string;
+  originAuthId: string;
+  instanceStatus: string;
+  open: boolean;
+  decision?: string;
+  executedAfterDecision: string[];
+  pausableAhead: string[];
+  compensated?: string[];
+  compensationRemaining?: string[];
 }

@@ -216,6 +216,14 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.updateWaitScope(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "reconsiderations" && r.Method == http.MethodPost {
+		s.openReconsideration(w, r, id)
+		return
+	}
+	if len(parts) >= 3 && parts[1] == "reconsiderations" {
+		s.reconsiderationRoutes(w, r, id, parts[2])
+		return
+	}
 	if len(parts) == 2 && parts[1] == "migration" && r.Method == http.MethodGet {
 		s.previewMigration(w, r, id)
 		return
@@ -225,6 +233,115 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeErr(w, http.StatusNotFound, errMissing("route"))
+}
+
+// reconsiderationRoutes dispatches /api/instances/{id}/reconsiderations/{rid}[/...]
+func (s *Server) reconsiderationRoutes(w http.ResponseWriter, r *http.Request, id, rid string) {
+	sub := strings.TrimPrefix(r.URL.Path, "/api/instances/"+id+"/reconsiderations/"+rid)
+	switch {
+	case sub == "" && r.Method == http.MethodGet:
+		s.reconsiderationProgress(w, r, id, rid)
+	case sub == "/inputs" && r.Method == http.MethodPost:
+		s.deliverReconsiderVote(w, r, id, rid)
+	case sub == "/scope" && r.Method == http.MethodPost:
+		s.reconsiderScope(w, r, id, rid)
+	case sub == "/timeout" && r.Method == http.MethodPost:
+		s.reconsiderTimeout(w, r, id, rid)
+	default:
+		writeErr(w, http.StatusNotFound, errMissing("route"))
+	}
+}
+
+// withInstance loads the instance under its lock and runs fn with the
+// pinned definition, then persists. Shared by all reconsideration routes.
+func (s *Server) withInstance(w http.ResponseWriter, id string, fn func(inst *model.Instance, def *model.Definition) (any, error)) {
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	out, err := fn(inst, def)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) openReconsideration(w http.ResponseWriter, r *http.Request, id string) {
+	var req engine.ReconsiderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	s.withInstance(w, id, func(inst *model.Instance, def *model.Definition) (any, error) {
+		rec, err := s.engine.OpenReconsideration(def, inst, req)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"reconsideration": rec, "instance": inst}, nil
+	})
+}
+
+func (s *Server) deliverReconsiderVote(w http.ResponseWriter, r *http.Request, id, rid string) {
+	var input model.ExternalInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	s.withInstance(w, id, func(inst *model.Instance, def *model.Definition) (any, error) {
+		if err := s.engine.DeliverReconsiderVote(def, inst, rid, input); err != nil {
+			return nil, err
+		}
+		return inst, nil
+	})
+}
+
+func (s *Server) reconsiderTimeout(w http.ResponseWriter, r *http.Request, id, rid string) {
+	s.withInstance(w, id, func(inst *model.Instance, def *model.Definition) (any, error) {
+		s.engine.CheckReconsiderTimeout(def, inst, time.Now().UTC())
+		return inst, nil
+	})
+}
+
+func (s *Server) reconsiderScope(w http.ResponseWriter, r *http.Request, id, rid string) {
+	var req engine.ReconsiderScopeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	s.withInstance(w, id, func(inst *model.Instance, def *model.Definition) (any, error) {
+		if err := s.engine.UpdateReconsiderScope(def, inst, rid, req); err != nil {
+			return nil, err
+		}
+		return inst, nil
+	})
+}
+
+// reconsiderationProgress shows how far the original decision had advanced:
+// executed follow-up actions (compensate-only) vs still-pausable steps.
+func (s *Server) reconsiderationProgress(w http.ResponseWriter, r *http.Request, id, rid string) {
+	s.withInstance(w, id, func(inst *model.Instance, def *model.Definition) (any, error) {
+		rec := engine.FindReconsideration(inst, rid)
+		if rec == nil {
+			return nil, errMissing("复议 " + rid)
+		}
+		return map[string]any{
+			"reconsideration": rec,
+			"progress":        s.engine.ProgressReconsideration(def, inst, rec),
+		}, nil
+	})
 }
 
 func (s *Server) deliverInput(w http.ResponseWriter, r *http.Request, id string) {

@@ -312,6 +312,14 @@ func (e *Engine) DeliverInput(def *model.Definition, inst *model.Instance, input
 			fmt.Sprintf("迟到的输入 %s 已忽略：实例当前状态为 %s，停在 %s", input.Key, inst.Status, effectiveStop(inst)))
 		return nil
 	}
+	if inst.Reconsidering {
+		// A reconsideration is open: follow-up actions are paused. The input
+		// is held (recorded, not effective) so it can never push the original
+		// business forward while the decision is under review.
+		e.addRecord(inst, inst.WaitNode, "", "input_held", model.NodeEntered,
+			fmt.Sprintf("复议进行中，输入 %s 已暂扣：复议形成决定前后续动作暂停", input.Key))
+		return nil
+	}
 	if input.WaitNode != "" && input.WaitNode != inst.WaitNode {
 		return fmt.Errorf("输入目标节点 %s 与等待节点 %s 不一致", input.WaitNode, inst.WaitNode)
 	}
@@ -357,6 +365,10 @@ func (e *Engine) Resume(def *model.Definition, inst *model.Instance) {
 	if inst.Status != model.StatusRunning {
 		return
 	}
+	if inst.Reconsidering {
+		// 复议等待期间暂停推进：复议形成决定前不执行任何后续业务动作。
+		return
+	}
 	if inst.Compensating {
 		// A crash happened while compensating. The journal tells us exactly
 		// which compensations already completed; never invoke them again.
@@ -391,7 +403,7 @@ func (e *Engine) continueCompensation(def *model.Definition, inst *model.Instanc
 	var succeeded []string
 	seen := map[string]bool{}
 	for _, rec := range inst.Records {
-		if rec.Action == "succeed" {
+		if rec.Action == "succeed" && rec.Seq > inst.CompensateAfterSeq {
 			n := nodeMap[rec.NodeID]
 			if n.Type == model.NodeTask && !seen[n.ID] {
 				succeeded = append(succeeded, n.ID)

@@ -91,6 +91,8 @@ button.primary { background: #2563eb; color: #fff; border-color: #2563eb; width:
   border-radius: 8px; padding: 8px 12px; font-size: 12px;
 }
 .migration-section { border-top: 1px solid #e2e8f0; margin-top: 12px; padding-top: 8px; }
+.reconsider-section { border-top: 1px solid #e2e8f0; margin-top: 12px; padding-top: 8px; }
+.reconsider-progress { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; margin: 8px 0; }
 .migration-preview { border: 1px solid #c4b5fd; background: #f5f3ff; border-radius: 8px; padding: 8px; margin-top: 8px; }
 .impact-list { list-style: none; margin: 6px 0; padding: 0; font-size: 12px; }
 .impact-list li { display: flex; gap: 8px; align-items: center; padding: 3px 0; }

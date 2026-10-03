@@ -162,8 +162,16 @@ func (e *Engine) decideWait(inst *model.Instance, decision, why string) {
 	ws.Decision = decision
 	ws.DecisionAuthID = ws.AuthID
 	auth := currentAuth(ws)
+	seq := len(inst.Records) + 1
 	e.addRecord(inst, inst.WaitNode, "", "wait_decided", model.NodeSucceeded,
 		fmt.Sprintf("协作等待决定：%s（%s；依据授权范围 %s：参与方 %s）", decision, why, auth.ID, strings.Join(auth.Participants, "、")))
+	inst.WaitDecisions = append(inst.WaitDecisions, model.WaitDecision{
+		NodeID:   inst.WaitNode,
+		Decision: decision,
+		AuthID:   auth.ID,
+		Seq:      seq,
+		At:       time.Now().UTC(),
+	})
 }
 
 // completeWait leaves the wait node along its outgoing edge and continues.

@@ -116,8 +116,64 @@ type Instance struct {
 	// so a restart keeps waiting with every confirmation intact.
 	Wait *WaitState `json:"wait,omitempty"`
 
+	// WaitDecisions is the durable audit trail of every collaborative-wait
+	// decision. A reconsideration links back to one of these entries; the
+	// original approvals/delegations/scope stay exactly as recorded.
+	WaitDecisions []WaitDecision `json:"waitDecisions,omitempty"`
+
+	// Reconsiderations lists every reconsideration round opened against a
+	// decided collaborative wait. At most one is open at a time.
+	Reconsiderations []*Reconsideration `json:"reconsiderations,omitempty"`
+	// Reconsidering is true while a reconsideration is open: follow-up
+	// business actions are paused (inputs are held, resume is a no-op) until
+	// the round reaches its single decision.
+	Reconsidering bool `json:"reconsidering,omitempty"`
+	// CompensateAfterSeq scopes compensation to succeed records newer than
+	// this record seq (used when an upheld reconsideration rolls back only
+	// the follow-up actions of one decision). Zero means compensate all.
+	CompensateAfterSeq int `json:"compensateAfterSeq,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// WaitDecision records the single terminal decision of a collaborative
+// wait so a later reconsideration can reference it without rewriting it.
+type WaitDecision struct {
+	NodeID   string    `json:"nodeId"`
+	Decision string    `json:"decision"`
+	AuthID   string    `json:"authId"`
+	Seq      int       `json:"seq"` // record seq of the wait_decided event
+	At       time.Time `json:"at"`
+}
+
+// Reconsideration is one review round opened against a passed
+// collaborative decision. It has its own participation scope and
+// materials; neither rewrites the original decision's history, and votes
+// from the original wait (or earlier rounds) never count toward it.
+type Reconsideration struct {
+	ID             string            `json:"id"`
+	WaitNode       string            `json:"waitNode"` // original decided wait node
+	OriginDecision string            `json:"originDecision"`
+	OriginAuthID   string            `json:"originAuthId"`
+	OriginSeq      int               `json:"originSeq"` // record seq of the original wait_decided
+	Participants   []string          `json:"participants"`
+	AllowDelegate  bool              `json:"allowDelegate"`
+	Delegations    map[string]string `json:"delegations,omitempty"`
+	// Materials are the corrected documents this round is based on. They
+	// are visible to the review only and never merged into instance data.
+	Materials map[string]any        `json:"materials,omitempty"`
+	Reason    string                `json:"reason,omitempty"`
+	Received  map[string]PartyInput `json:"received"`
+	Deadline  *time.Time            `json:"deadline,omitempty"`
+	// TimeoutPolicy: "uphold" means expiry passes the reconsideration;
+	// anything else (default) means the reconsideration lapses and the
+	// original decision stands.
+	TimeoutPolicy string     `json:"timeoutPolicy,omitempty"`
+	Decided       bool       `json:"decided,omitempty"`
+	Decision      string     `json:"decision,omitempty"` // upheld | rejected | expired_upheld | expired_rejected
+	CreatedAt     time.Time  `json:"createdAt"`
+	DecidedAt     *time.Time `json:"decidedAt,omitempty"`
 }
 
 // DefinitionRef records that an instance was pinned to a definition version.

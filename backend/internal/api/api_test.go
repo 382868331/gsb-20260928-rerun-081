@@ -60,6 +60,87 @@ func do(t *testing.T, h http.Handler, method, path string, body any, into any) i
 	return w.Code
 }
 
+func TestHTTPReconsiderationFlow(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	h, _ := setup(t, dir)
+
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "t1", Type: model.NodeTask, Name: "准备", CompensateTo: "t1"},
+		{ID: "sign", Type: model.NodeWait, Name: "会签", Participants: []string{"a", "b"}},
+		{ID: "t2", Type: model.NodeTask, Name: "打包", CompensateTo: "t2"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{
+		{ID: "a1", From: "s", To: "t1"},
+		{ID: "a2", From: "t1", To: "sign"},
+		{ID: "a3", From: "sign", To: "t2"},
+		{ID: "a4", From: "t2", To: "e"},
+	}
+	var def model.Definition
+	if c := do(t, h, "POST", "/api/definitions", map[string]any{"name": "rec-flow", "nodes": nodes, "edges": edges}, &def); c != 201 {
+		t.Fatalf("publish: %d", c)
+	}
+	var inst model.Instance
+	if c := do(t, h, "POST", "/api/instances", map[string]any{"definitionId": def.ID, "data": map[string]any{}}, &inst); c != 201 {
+		t.Fatalf("start: %d", c)
+	}
+	for _, in := range []map[string]any{
+		{"waitNode": "sign", "key": "k-a", "from": "a"},
+		{"waitNode": "sign", "key": "k-b", "from": "b"},
+	} {
+		if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", in, &inst); c != 200 {
+			t.Fatalf("input: %d", c)
+		}
+	}
+	if inst.Status != "completed" {
+		t.Fatalf("应已完成, got %s", inst.Status)
+	}
+	var opened struct {
+		Reconsideration model.Reconsideration `json:"reconsideration"`
+	}
+	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations", map[string]any{
+		"waitNode": "sign", "participants": []string{"a", "b"}, "reason": "资料有误",
+	}, &opened); c != 200 {
+		t.Fatalf("open reconsideration: %d", c)
+	}
+	rid := opened.Reconsideration.ID
+	var view struct {
+		Progress engine.ReconsiderProgress `json:"progress"`
+	}
+	if c := do(t, h, "GET", "/api/instances/"+inst.ID+"/reconsiderations/"+rid, nil, &view); c != 200 {
+		t.Fatalf("progress: %d", c)
+	}
+	if len(view.Progress.ExecutedAfterDecision) != 1 || view.Progress.ExecutedAfterDecision[0] != "t2" {
+		t.Fatalf("已执行待补偿应为 [t2], got %v", view.Progress.ExecutedAfterDecision)
+	}
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "k-a", "from": "a"}, &inst)
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "r-a", "from": "a"}, &inst)
+	if !inst.Reconsidering {
+		t.Fatal("部分意见不应结束复议")
+	}
+	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "r-b", "from": "b"}, &inst); c != 200 {
+		t.Fatal("vote b")
+	}
+	if !inst.CompensatedNodes["t2"] || inst.CompensatedNodes["t1"] {
+		t.Fatal("复议通过只补偿原决定之后的动作")
+	}
+	if inst.Status != "failed" || inst.StoppedAt != "sign" {
+		t.Fatalf("应回到原决定点, got %s/%s", inst.Status, inst.StoppedAt)
+	}
+	h2, _ := setup(t, dir)
+	var got struct {
+		Instance model.Instance `json:"instance"`
+	}
+	if c := do(t, h2, "GET", "/api/instances/"+inst.ID, nil, &got); c != 200 {
+		t.Fatalf("reload: %d", c)
+	}
+	recs := got.Instance.Reconsiderations
+	if len(recs) != 1 || recs[0].Decision != "upheld" || got.Instance.WaitDecisions[0].Decision != "approved" {
+		t.Fatal("重启后应能沿原决定与复议依据解释当前状态")
+	}
+}
+
 func TestHTTPEndToEndAcrossRestart(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data")
 	h, _ := setup(t, dir)
