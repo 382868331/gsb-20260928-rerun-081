@@ -27,6 +27,14 @@ const ACTION_LABEL: Record<string, string> = {
   compensate_done: "补偿全部完成",
   definition_migrated: "迁移到新定义版本",
   complete: "流程完成"
+  ,
+  review_opened: "发起复议",
+  review_input_received: "复议意见生效",
+  review_scope_changed: "复议范围变更",
+  review_decided: "复议决定",
+  review_old_vote_rejected: "旧投票不能凑复议人数",
+  held_by_review: "复议期间挂起",
+  wait_cancelled_by_review: "复议取消后续等待"
 };
 
 export function stopLabel(inst: Instance, def?: Definition): string {

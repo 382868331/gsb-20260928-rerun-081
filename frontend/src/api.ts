@@ -1,4 +1,4 @@
-import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview } from "./types";
+import type { Definition, FlowEdge, FlowNode, Instance, MigrationPreview, ReviewProgress, ReviewState } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -70,4 +70,31 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ...target, confirm: true })
     })
+  ,
+  getReview: (id: string) =>
+    req<{ reviews: ReviewState[] | null; progress: ReviewProgress | null }>("/api/instances/" + id + "/review"),
+  openReview: (id: string, body: {
+    participants: string[];
+    allowDelegate?: boolean;
+    materials?: Record<string, unknown>;
+    reason?: string;
+    timeoutSeconds?: number;
+  }) =>
+    req<Instance>("/api/instances/" + id + "/review", { method: "POST", body: JSON.stringify(body) }),
+  deliverReviewInput: (id: string, key: string, from: string, payload: Record<string, unknown>) =>
+    req<Instance>("/api/instances/" + id + "/review/inputs", {
+      method: "POST",
+      body: JSON.stringify({ key, from, payload })
+    }),
+  reviewTimeout: (id: string) =>
+    req<Instance>("/api/instances/" + id + "/review/timeout", { method: "POST" }),
+  updateReviewScope: (id: string, req2: {
+    participants?: string[];
+    allowDelegate?: boolean;
+    grantDelegations?: Record<string, string>;
+    revokeDelegations?: string[];
+    keepPriorInputs: boolean;
+    reason?: string;
+  }) =>
+    req<Instance>("/api/instances/" + id + "/review/scope", { method: "POST", body: JSON.stringify(req2) })
 };

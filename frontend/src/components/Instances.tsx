@@ -5,6 +5,7 @@ import { api } from "../api";
 import type { Definition, Instance, MigrationPreview, StepRecord, WaitState } from "../types";
 import { applyExecution, definitionToFlow } from "../flowView";
 import { RecordList, STATUS_LABEL, stopLabel, consumedKeys } from "./RecordList";
+import { ReviewSection, decidedWaitOf } from "./ReviewSection";
 
 interface Props {
   definitions: Definition[];
@@ -301,6 +302,20 @@ export function Instances({ definitions, latestByName, refreshKey, onEditedPubli
             wait={detail.instance.wait}
             instanceId={detail.instance.id}
             waiting={detail.instance.status === "waiting"}
+            busy={busy}
+            setBusy={setBusy}
+            onChanged={async () => {
+              await loadDetail(detail.instance.id);
+              await loadList(detail.instance.id);
+            }}
+            onNotice={setNotice}
+            onError={setError}
+          />
+        )}
+
+        {detail && decidedWaitOf(detail.instance) && (
+          <ReviewSection
+            detail={detail}
             busy={busy}
             setBusy={setBusy}
             onChanged={async () => {

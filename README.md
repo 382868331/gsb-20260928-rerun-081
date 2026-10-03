@@ -23,6 +23,14 @@ Go 流程引擎 + React 流程编辑器。第一轮交付：
 - **单一决定**：重复输入、撤回委托与超时同时到达时（实例级锁串行化）只形成一个决定；已有决定后的迟到输入（含补偿期间）仅作为历史事件保留，不重做任何动作
 - **续跑安全**：协作等待状态随实例落盘，重启后继续等待，已有确认不丢失、不重复执行
 
+第三轮新增：
+
+- **复议（针对已决定的多方协作）**：对已形成决定的协作等待可发起复议，复议与原决定相连但互不改写——原来的赞成、委托和生效范围原样保留在 `waitHistory` 中，复议自带新的参与范围与依据资料，只影响本轮
+- **复议等待期间可见进度**：`GET /api/instances/{id}/review` 返回原决定推进情况——已执行、只能按流程补偿的后续动作，与尚未执行、仍可暂停的动作；期间业务输入与 resume 都被挂起并记录 `held_by_review` 事件
+- **复议唯一决定**：复议通过（集齐且无反对票）、拒绝（任一参与方 `vote=reject`）、到期（`expired`，复议不成立、原决定继续有效）各自只形成一次决定；复议 key 独立计票，原业务等待已生效的旧投票 key 会被 `review_old_vote_rejected` 拒绝，不能凑新一轮人数
+- **复议通过的补偿边界**：只补偿原决定记录（`wait_decided`）之后执行的任务（`CompSinceSeq` 边界），原决定之前的步骤不动；挂起的后续等待被取消，补偿期间及之后业务输入一律按迟到忽略，不会再次推动原业务动作
+- **补偿失败保留未完成范围**：补偿失败仍停在真实停点，进度视图继续列出 `pendingCompensation`，复议结束不等于全部恢复；重启/重新打开后可沿原决定、复议依据（授权历史与资料）和每条真实事件解释当前状态
+
 ## 目录
 
 - `backend/` Go 服务：`model`（定义/实例/执行记录）、`engine`（执行/条件/补偿）、`store`（JSON 持久化）、`api`（HTTP）
@@ -66,6 +74,11 @@ cd ../backend && go run ./cmd/server -static ../frontend/dist
 - `POST /api/instances/{id}/migration` `{definitionId, confirm:true}` 用户确认后迁移；未确认或等待节点在新版本中缺失都会被拒绝
 - `POST /api/instances/{id}/wait/scope` 修改协作等待的接收范围 `{participants, grantDelegations, revokeDelegations, keepPriorInputs, reason}`
 - `POST /api/instances/{id}/timeout` 对协作等待立即做一次到期判定（决定最多形成一次）
+- `POST /api/instances/{id}/review` 对已决定的协作等待发起复议 `{participants, materials, reason, timeoutSeconds, allowDelegate}`
+- `GET  /api/instances/{id}/review` 复议轮次与进度视图（已执行待补偿 / 仍可暂停 / 未完成补偿范围）
+- `POST /api/instances/{id}/review/inputs` 复议意见 `{key, from, payload}`，`payload.vote="reject"` 表示反对复议
+- `POST /api/instances/{id}/review/scope` 修改复议参与范围 / 委托（不影响原决定的授权历史）
+- `POST /api/instances/{id}/review/timeout` 复议到期判定（`expired` 决定最多形成一次）
 
 迁移只改变实例之后固定的定义 id：旧记录不删除、不改写、不与新版本事件拼接；继续提交人工输入后，等待点之后的步骤按新版本执行，已生效的幂等 key 继续有效。
 

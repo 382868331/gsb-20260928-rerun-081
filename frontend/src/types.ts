@@ -84,6 +84,8 @@ export interface Instance {
   compensatedNodes?: Record<string, boolean>;
   definitionHistory?: { definitionId: string; name: string; version: number; since: string }[];
   wait?: WaitState;
+  waitHistory?: WaitState[];
+  reviews?: ReviewState[];
   createdAt: string;
   updatedAt: string;
 }
@@ -106,6 +108,7 @@ export interface WaitAuthorization {
 }
 
 export interface WaitState {
+  nodeId?: string;
   authId: string;
   received: Record<string, PartyInput>;
   authorizations: WaitAuthorization[];
@@ -113,4 +116,32 @@ export interface WaitState {
   decided?: boolean;
   decision?: string;
   decisionAuthId?: string;
+}
+
+export interface ReviewState {
+  id: string;
+  waitNode: string;
+  origDecision: string;
+  origAuthId: string;
+  origDecideSeq: number;
+  materials?: Record<string, unknown>;
+  reason?: string;
+  authId: string;
+  received: Record<string, PartyInput>;
+  authorizations: WaitAuthorization[];
+  deadline?: string;
+  decided?: boolean;
+  decision?: string; // approved | rejected | expired
+  decisionAuthId?: string;
+  openedAt: string;
+  decidedAt?: string;
+}
+
+export interface ReviewProgress {
+  reviewId: string;
+  waitNode: string;
+  executedAfter: string[];
+  compensated: string[];
+  pendingCompensation: string[];
+  pausableAhead: string[];
 }

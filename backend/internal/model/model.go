@@ -105,6 +105,10 @@ type Instance struct {
 	Compensating     bool            `json:"compensating,omitempty"`
 	FailedNode       string          `json:"failedNode,omitempty"` // node whose failure triggered compensation
 	CompensatedNodes map[string]bool `json:"compensatedNodes,omitempty"`
+	// CompSinceSeq limits compensation to succeed events after this record
+	// seq (0 = compensate everything). A review that overturns a decision
+	// only rolls back the follow-up actions taken after that decision.
+	CompSinceSeq int `json:"compSinceSeq,omitempty"`
 
 	// DefinitionHistory audits explicit migrations of waiting instances. Old
 	// step records always keep the definition version they happened under; the
@@ -115,6 +119,15 @@ type Instance struct {
 	// instance waits at a multi-party wait node. Persisted with the instance
 	// so a restart keeps waiting with every confirmation intact.
 	Wait *WaitState `json:"wait,omitempty"`
+
+	// WaitHistory archives decided collaborative waits (most recent last) so
+	// a later review can always trace the original decision, its
+	// authorizations and its inputs even after the instance moved on.
+	WaitHistory []*WaitState `json:"waitHistory,omitempty"`
+
+	// Reviews are reconsideration rounds attached to a decided collaborative
+	// wait. At most one is undecided at a time; decided ones stay as history.
+	Reviews []*ReviewState `json:"reviews,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -164,6 +177,7 @@ type WaitAuthorization struct {
 // WaitState is the durable state of an in-progress collaborative wait.
 // It survives save/restart so confirmations are never re-executed.
 type WaitState struct {
+	NodeID         string                `json:"nodeId,omitempty"` // wait node this state belongs to
 	AuthID         string                `json:"authId"`
 	Received       map[string]PartyInput `json:"received"`       // effective participant -> confirmation
 	Authorizations []WaitAuthorization   `json:"authorizations"` // full history, last is current
@@ -171,4 +185,48 @@ type WaitState struct {
 	Decided        bool                  `json:"decided,omitempty"`
 	Decision       string                `json:"decision,omitempty"`       // approved | rejected | timeout_approved | timeout_rejected
 	DecisionAuthID string                `json:"decisionAuthId,omitempty"` // scope in effect at decision time
+}
+
+// ReviewState is a reconsideration (复议) attached to an already-decided
+// collaborative wait. The original decision, its approvals, delegations and
+// effective scope are never rewritten; the review carries its own
+// participation scope and materials that only affect this review round.
+type ReviewState struct {
+	ID            string         `json:"id"`
+	WaitNode      string         `json:"waitNode"` // original decided wait node
+	OrigDecision  string         `json:"origDecision"`
+	OrigAuthID    string         `json:"origAuthId"`
+	OrigDecideSeq int            `json:"origDecideSeq"`       // record seq of the original wait_decided event
+	Materials     map[string]any `json:"materials,omitempty"` // 复议依据资料，仅影响本次复议
+	Reason        string         `json:"reason,omitempty"`
+
+	AuthID         string                `json:"authId"`
+	Received       map[string]PartyInput `json:"received"`
+	Authorizations []WaitAuthorization   `json:"authorizations"`
+	ConsumedKeys   map[string]bool       `json:"consumedKeys"` // review-round idempotency, separate from business keys
+	Deadline       *time.Time            `json:"deadline,omitempty"`
+
+	Decided        bool       `json:"decided,omitempty"`
+	Decision       string     `json:"decision,omitempty"` // approved | rejected | expired
+	DecisionAuthID string     `json:"decisionAuthId,omitempty"`
+	OpenedAt       time.Time  `json:"openedAt"`
+	DecidedAt      *time.Time `json:"decidedAt,omitempty"`
+}
+
+// ActiveReview returns the still-undecided review, if any.
+func (inst *Instance) ActiveReview() *ReviewState {
+	for _, rv := range inst.Reviews {
+		if !rv.Decided {
+			return rv
+		}
+	}
+	return nil
+}
+
+// LastReview returns the most recent review, decided or not.
+func (inst *Instance) LastReview() *ReviewState {
+	if len(inst.Reviews) == 0 {
+		return nil
+	}
+	return inst.Reviews[len(inst.Reviews)-1]
 }

@@ -315,7 +315,15 @@ func (e *Engine) DeliverInput(def *model.Definition, inst *model.Instance, input
 	if input.WaitNode != "" && input.WaitNode != inst.WaitNode {
 		return fmt.Errorf("输入目标节点 %s 与等待节点 %s 不一致", input.WaitNode, inst.WaitNode)
 	}
-	if inst.Wait != nil {
+	if rv := inst.ActiveReview(); rv != nil {
+		// While a reconsideration of the original decision is pending,
+		// business follow-up actions are pausable: hold the input instead of
+		// advancing. It is recorded so the pause is explainable afterwards.
+		e.addRecord(inst, inst.WaitNode, "", "held_by_review", model.NodeEntered,
+			fmt.Sprintf("复议 %s 等待期间，输入 %s 已挂起：后续动作暂停推进，待复议决定后再提交", rv.ID, input.Key))
+		return nil
+	}
+	if inst.Wait != nil && !inst.Wait.Decided {
 		// Collaborative wait: needs every effective participant; partial
 		// input never completes the step.
 		return e.deliverCollaborative(def, inst, input)
@@ -357,6 +365,12 @@ func (e *Engine) Resume(def *model.Definition, inst *model.Instance) {
 	if inst.Status != model.StatusRunning {
 		return
 	}
+	if rv := inst.ActiveReview(); rv != nil && !inst.Compensating {
+		// Forward progress is paused while the review is pending.
+		e.addRecord(inst, inst.CurrentNode, "", "held_by_review", model.NodeEntered,
+			fmt.Sprintf("复议 %s 等待期间，实例推进保持暂停", rv.ID))
+		return
+	}
 	if inst.Compensating {
 		// A crash happened while compensating. The journal tells us exactly
 		// which compensations already completed; never invoke them again.
@@ -372,6 +386,7 @@ func (e *Engine) Resume(def *model.Definition, inst *model.Instance) {
 func (e *Engine) startCompensation(def *model.Definition, inst *model.Instance, failed model.Node) {
 	inst.Compensating = true
 	inst.FailedNode = failed.ID
+	inst.CompSinceSeq = 0
 	if inst.CompensatedNodes == nil {
 		inst.CompensatedNodes = map[string]bool{}
 	}
@@ -391,6 +406,11 @@ func (e *Engine) continueCompensation(def *model.Definition, inst *model.Instanc
 	var succeeded []string
 	seen := map[string]bool{}
 	for _, rec := range inst.Records {
+		if rec.Seq <= inst.CompSinceSeq {
+			// Before the compensation boundary (e.g. steps that predate the
+			// original decision a review overturned): never rolled back.
+			continue
+		}
 		if rec.Action == "succeed" {
 			n := nodeMap[rec.NodeID]
 			if n.Type == model.NodeTask && !seen[n.ID] {

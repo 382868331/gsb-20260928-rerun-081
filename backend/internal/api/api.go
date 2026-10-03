@@ -212,6 +212,26 @@ func (s *Server) instanceRoutes(w http.ResponseWriter, r *http.Request) {
 		s.evaluateTimeout(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "review" && r.Method == http.MethodGet {
+		s.getReview(w, r, id)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "review" && r.Method == http.MethodPost {
+		s.openReview(w, r, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "review" && parts[2] == "inputs" && r.Method == http.MethodPost {
+		s.deliverReviewInput(w, r, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "review" && parts[2] == "timeout" && r.Method == http.MethodPost {
+		s.evaluateReviewTimeout(w, r, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "review" && parts[2] == "scope" && r.Method == http.MethodPost {
+		s.updateReviewScope(w, r, id)
+		return
+	}
 	if len(parts) == 3 && parts[1] == "wait" && parts[2] == "scope" && r.Method == http.MethodPost {
 		s.updateWaitScope(w, r, id)
 		return
@@ -408,6 +428,145 @@ func (s *Server) updateWaitScope(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	writeJSON(w, http.StatusOK, inst)
+}
+
+// openReview starts a reconsideration round on the instance's decided
+// collaborative wait. The original decision history is never rewritten.
+func (s *Server) openReview(w http.ResponseWriter, r *http.Request, id string) {
+	var req engine.OpenReviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.engine.OpenReview(def, inst, req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+// deliverReviewInput records one review opinion (its own key namespace).
+func (s *Server) deliverReviewInput(w http.ResponseWriter, r *http.Request, id string) {
+	var input model.ExternalInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if input.Key == "" {
+		writeErr(w, http.StatusBadRequest, errMissing("key"))
+		return
+	}
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.engine.DeliverReviewInput(def, inst, input); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+// evaluateReviewTimeout triggers the review deadline check; at most one
+// review decision is ever formed.
+func (s *Server) evaluateReviewTimeout(w http.ResponseWriter, r *http.Request, id string) {
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.engine.CheckReviewTimeout(def, inst, time.Now().UTC())
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+// updateReviewScope changes the participation scope of the live review round.
+func (s *Server) updateReviewScope(w http.ResponseWriter, r *http.Request, id string) {
+	var req engine.ScopeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	unlock := s.store.LockInstance(id)
+	defer unlock()
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.engine.UpdateReviewScope(def, inst, req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SaveInstance(inst); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, inst)
+}
+
+// getReview returns the review rounds plus the progress view: how far the
+// original decision advanced, what is still pausable, what must be
+// compensated, and which compensations remain unfinished.
+func (s *Server) getReview(w http.ResponseWriter, r *http.Request, id string) {
+	inst, err := s.store.GetInstance(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	def, err := s.store.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	var progress any
+	if rv := inst.LastReview(); rv != nil {
+		progress = s.engine.ReviewProgress(def, inst, rv)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reviews": inst.Reviews, "progress": progress})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

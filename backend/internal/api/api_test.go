@@ -417,3 +417,99 @@ func TestHTTPCollaborativeWaitFlow(t *testing.T) {
 		t.Fatal("已有决定后超时判定不得改变结果")
 	}
 }
+
+func TestHTTPReviewRound(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	h, _ := setup(t, dir)
+
+	nodes := []model.Node{
+		{ID: "s", Type: model.NodeStart, Name: "开始"},
+		{ID: "prep", Type: model.NodeTask, Name: "准备", CompensateTo: "prep"},
+		{ID: "sign", Type: model.NodeWait, Name: "会签", Participants: []string{"alice", "bob"}},
+		{ID: "ship", Type: model.NodeTask, Name: "发货", CompensateTo: "ship"},
+		{ID: "confirm", Type: model.NodeWait, Name: "确认"},
+		{ID: "e", Type: model.NodeEnd, Name: "结束"},
+	}
+	edges := []model.Edge{
+		{ID: "a", From: "s", To: "prep"},
+		{ID: "b", From: "prep", To: "sign"},
+		{ID: "c", From: "sign", To: "ship"},
+		{ID: "d", From: "ship", To: "confirm"},
+		{ID: "e2", From: "confirm", To: "e"},
+	}
+	var def model.Definition
+	if code := do(t, h, "POST", "/api/definitions", map[string]any{"name": "review-api", "nodes": nodes, "edges": edges}, &def); code != 201 {
+		t.Fatalf("publish: %d", code)
+	}
+	var inst model.Instance
+	if code := do(t, h, "POST", "/api/instances", map[string]any{"definitionId": def.ID, "data": map[string]any{}}, &inst); code != 201 {
+		t.Fatalf("start: %d", code)
+	}
+	for _, in := range []map[string]any{
+		{"waitNode": "sign", "key": "k-a", "from": "alice"},
+		{"waitNode": "sign", "key": "k-b", "from": "bob"},
+	} {
+		if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", in, &inst); code != 200 {
+			t.Fatalf("input: %d", code)
+		}
+	}
+	if inst.WaitNode != "confirm" {
+		t.Fatalf("应推进到 confirm, got %s", inst.WaitNode)
+	}
+
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/review", map[string]any{
+		"participants": []string{"carol", "dave"}, "materials": map[string]any{"doc": "v2"}, "reason": "资料有误",
+	}, &inst); code != 200 {
+		t.Fatalf("open review: %d", code)
+	}
+	if len(inst.Reviews) != 1 {
+		t.Fatal("复议应已开启")
+	}
+
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/inputs", map[string]any{
+		"waitNode": "confirm", "key": "biz-1",
+	}, &inst); code != 200 {
+		t.Fatalf("held input: %d", code)
+	}
+	if inst.ConsumedInputs["biz-1"] || inst.WaitNode != "confirm" {
+		t.Fatal("复议期间业务输入应挂起")
+	}
+
+	var rv struct {
+		Progress *struct {
+			ExecutedAfter []string `json:"executedAfter"`
+			PausableAhead []string `json:"pausableAhead"`
+		} `json:"progress"`
+	}
+	if code := do(t, h, "GET", "/api/instances/"+inst.ID+"/review", nil, &rv); code != 200 {
+		t.Fatalf("get review: %d", code)
+	}
+	if rv.Progress == nil || len(rv.Progress.ExecutedAfter) != 1 || rv.Progress.ExecutedAfter[0] != "ship" {
+		t.Fatalf("进度视图应显示 ship 已执行, got %+v", rv.Progress)
+	}
+
+	if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/review/inputs", map[string]any{
+		"key": "k-a", "from": "carol",
+	}, &inst); code != 200 {
+		t.Fatalf("old vote: %d", code)
+	}
+	if len(inst.Reviews[0].Received) != 0 {
+		t.Fatal("旧投票不能计入复议")
+	}
+
+	for _, in := range []map[string]any{
+		{"key": "r-1", "from": "carol"},
+		{"key": "r-2", "from": "dave"},
+	} {
+		if code := do(t, h, "POST", "/api/instances/"+inst.ID+"/review/inputs", in, &inst); code != 200 {
+			t.Fatalf("review input: %d", code)
+		}
+	}
+	last := inst.Reviews[len(inst.Reviews)-1]
+	if !last.Decided || last.Decision != "approved" {
+		t.Fatalf("复议应通过, got %s", last.Decision)
+	}
+	if inst.Status != model.StatusFailed || !inst.CompensatedNodes["ship"] || inst.CompensatedNodes["prep"] {
+		t.Fatalf("复议通过后只补偿后续动作 ship, got %s %+v", inst.Status, inst.CompensatedNodes)
+	}
+}

@@ -18,6 +18,7 @@ import (
 // WaitState so a restart keeps waiting with confirmations intact.
 func (e *Engine) enterWait(inst *model.Instance, node model.Node) {
 	if len(node.Participants) == 0 {
+		inst.Wait = nil // a plain wait node is never collaborative
 		e.addRecord(inst, node.ID, "", "wait", model.NodeEntered, node.Name)
 		inst.Status = model.StatusWaiting
 		inst.WaitNode = node.ID
@@ -34,6 +35,7 @@ func (e *Engine) enterWait(inst *model.Instance, node model.Node) {
 		Reason:        "按流程定义初始化参与范围",
 	}
 	inst.Wait = &model.WaitState{
+		NodeID:         node.ID,
 		AuthID:         auth.ID,
 		Received:       map[string]model.PartyInput{},
 		Authorizations: []model.WaitAuthorization{auth},
@@ -169,6 +171,11 @@ func (e *Engine) decideWait(inst *model.Instance, decision, why string) {
 // completeWait leaves the wait node along its outgoing edge and continues.
 func (e *Engine) completeWait(def *model.Definition, inst *model.Instance) {
 	waitNode := inst.WaitNode
+	if inst.Wait != nil && inst.Wait.Decided {
+		// Archive the decided collaborative wait so reviews can trace the
+		// original decision and its authorization history forever.
+		inst.WaitHistory = append(inst.WaitHistory, inst.Wait)
+	}
 	inst.WaitNode = ""
 	inst.Status = model.StatusRunning
 	out := outgoing(def.Edges, waitNode)
