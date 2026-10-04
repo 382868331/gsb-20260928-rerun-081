@@ -94,6 +94,7 @@ export interface Instance {
 export interface PartyInput {
   key: string;
   from: string;
+  choice?: "uphold" | "rejected";
   authId: string;
   at: string;
 }
@@ -158,4 +159,8 @@ export interface ReconsiderProgress {
   pausableAhead: string[];
   compensated?: string[];
   compensationRemaining?: string[];
+  totalVotes: number;
+  receivedVotes: number;
+  upheldVotes: number;
+  rejectedVotes: number;
 }

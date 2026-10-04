@@ -5,7 +5,7 @@ import type { Instance, ReconsiderProgress } from "../types";
 const DECISION_LABEL: Record<string, string> = {
   approved: "通过",
   timeout_approved: "到期通过",
-  rejected: "拒绝",
+  rejected: "复议不成立（原决定保留）",
   timeout_rejected: "到期拒绝",
   upheld: "复议通过（原决定撤销）",
   expired_upheld: "复议到期通过",
@@ -39,6 +39,7 @@ export function ReconsiderSection({
   const [targetNode, setTargetNode] = useState("");
   const [voteKey, setVoteKey] = useState("rec-vote-001");
   const [voteFrom, setVoteFrom] = useState("");
+  const [voteComment, setVoteComment] = useState("");
   const [progress, setProgress] = useState<ReconsiderProgress | null>(null);
 
   const open = rounds.find((r) => !r.decided);
@@ -56,15 +57,17 @@ export function ReconsiderSection({
 
   if (decisions.length === 0 && rounds.length === 0) return null;
 
-  async function run(fn: () => Promise<unknown>, ok: string) {
+  async function run(fn: () => Promise<unknown>, ok: string): Promise<boolean> {
     setBusy(true);
     onError("");
     try {
       await fn();
       await onChanged();
       onNotice(ok);
+      return true;
     } catch (e) {
       onError((e as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -77,6 +80,7 @@ export function ReconsiderSection({
     r.participants.forEach((p) => set.add((r.allowDelegate && r.delegations?.[p]) || p));
     return [...set].sort();
   };
+  const choiceLabel = (choice?: string) => choice === "rejected" ? "反对撤销" : choice === "uphold" ? "赞成撤销" : "未明确";
 
   return (
     <div className="reconsider-section">
@@ -123,7 +127,8 @@ export function ReconsiderSection({
             <b>{shown.id}</b>（针对 {progress.originWaitNode} 的原决定 {DECISION_LABEL[progress.originDecision] || progress.originDecision} / 范围 {progress.originAuthId}）：
             {shown.decided ? <>已结束，唯一决定：<b>{DECISION_LABEL[shown.decision || ""] || shown.decision}</b></> : <b>进行中，后续动作已暂停</b>}
           </p>
-          <p className="hint">原决定已推进到：已执行（只能按流程补偿）：
+          <p className="hint">本轮统计：赞成撤销 {progress.upheldVotes} 票、反对撤销 {progress.rejectedVotes} 票，已收到 {progress.receivedVotes}/{progress.totalVotes}。</p>
+          <p className="hint">{shown.decision === "upheld" || shown.decision === "expired_upheld" ? "原决定已推进到：已执行（只能按流程补偿）：" : "原决定已推进并继续生效的动作："}
             {progress.executedAfterDecision.length ? progress.executedAfterDecision.join("、") : "无"}
             {progress.compensationRemaining?.length ? "；待补偿：" + progress.compensationRemaining.join("、") : ""}
             {progress.compensated?.length ? "；已补偿：" + progress.compensated.join("、") : ""}
@@ -131,7 +136,10 @@ export function ReconsiderSection({
           <p className="hint">尚可暂停的后续步骤：{progress.pausableAhead.length ? progress.pausableAhead.join("、") : "无"}</p>
           {!shown.decided && (
             <>
-              <p className="hint">本轮参与方：{shown.participants.join("、")}；已收到意见：{Object.keys(shown.received || {}).length}/{shown.participants.length}。旧投票不能凑新一轮人数。</p>
+              <p className="hint">
+                本轮意见：赞成撤销 {progress.upheldVotes} 票、反对撤销 {progress.rejectedVotes} 票，已收到 {progress.receivedVotes}/{progress.totalVotes}。
+                集齐全部意见后，全票赞成才撤销并补偿；只要有一票反对即拒绝复议，原决定和已生效动作保留。到期则按本轮到期策略单独决定。
+              </p>
               <label>意见来自（本轮有效参与方）
                 <select value={voteFrom} onChange={(e) => setVoteFrom(e.target.value)}>
                   <option value="">请选择</option>
@@ -141,9 +149,13 @@ export function ReconsiderSection({
                 </select>
               </label>
               <label>幂等键 key<input value={voteKey} onChange={(e) => setVoteKey(e.target.value)} /></label>
-              <button disabled={busy || !voteFrom} onClick={() =>
-                run(() => api.reconsiderVote(instance.id, shown.id, voteKey.trim(), voteFrom, {}), "意见已提交")
-              }>提交复议意见</button>
+              <label>反对/赞成理由（可选）<input value={voteComment} onChange={(e) => setVoteComment(e.target.value)} placeholder="说明本轮意见依据" /></label>
+              <button className="primary" disabled={busy || !voteFrom || Boolean(shown.received?.[voteFrom])} onClick={() =>
+                run(() => api.reconsiderVote(instance.id, shown.id, voteKey.trim() + "-uphold", voteFrom, "uphold", voteComment), "已提交赞成撤销意见").then((ok) => ok && setVoteComment(""))
+              }>提交赞成撤销</button>
+              <button disabled={busy || !voteFrom || Boolean(shown.received?.[voteFrom])} onClick={() =>
+                run(() => api.reconsiderVote(instance.id, shown.id, voteKey.trim() + "-reject", voteFrom, "rejected", voteComment), "已提交反对撤销意见；本轮将保留原决定").then((ok) => ok && setVoteComment(""))
+              }>提交反对撤销</button>
               {shown.deadline && (
                 <button disabled={busy} onClick={() =>
                   run(() => api.reconsiderTimeout(instance.id, shown.id), "已做到期判定（决定最多形成一次）")
@@ -151,10 +163,12 @@ export function ReconsiderSection({
               )}
             </>
           )}
+          {Object.entries(shown.received || {}).length > 0 && (
+            <p className="hint">已表态：{Object.entries(shown.received || {}).map(([from, vote]) => from + "（" + choiceLabel(vote.choice) + "）").join("、")}</p>
+          )}
         </div>
       )}
       {rounds.length > 1 && <p className="hint">历史复议轮次：{rounds.map((r) => r.id + "(" + (DECISION_LABEL[r.decision || ""] || "进行中") + ")").join("、")}</p>}
     </div>
   );
 }
-

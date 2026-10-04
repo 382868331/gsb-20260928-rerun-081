@@ -76,6 +76,10 @@ func openRec(t *testing.T, eng *engine.Engine, def *model.Definition, inst *mode
 	return rec
 }
 
+func recVote(key, from, choice string) model.ExternalInput {
+	return model.ExternalInput{Key: key, From: from, Payload: map[string]any{"choice": choice}}
+}
+
 func TestReconsiderOpenKeepsOriginalHistory(t *testing.T) {
 	st, eng := newTestEngine(t, filepath.Join(t.TempDir(), "data"))
 	def, inst := decidedInstance(t, st, eng)
@@ -149,11 +153,97 @@ func TestReconsiderOldVotesCannotCount(t *testing.T) {
 		t.Fatal("范围外意见应被拒绝")
 	}
 	// Partial vote does not decide.
-	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, model.ExternalInput{Key: "r-a", From: "alice"}); err != nil {
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-a", "alice", "uphold")); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Decided || !inst.Reconsidering {
 		t.Fatal("部分新意见到达时不应形成决定")
+	}
+}
+
+func TestReconsiderOneOppositionRejectsWithoutCompensation(t *testing.T) {
+	st, eng := newTestEngine(t, filepath.Join(t.TempDir(), "data"))
+	def, inst := decidedInstance(t, st, eng)
+	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{})
+
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-a", "alice", "uphold")); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Decided {
+		t.Fatal("单方赞成不能提前决定")
+	}
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-b", "bob", "rejected")); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Decision != "rejected" || inst.Reconsidering {
+		t.Fatalf("一票反对应拒绝复议, got decided=%v decision=%s reconsidering=%v", rec.Decided, rec.Decision, inst.Reconsidering)
+	}
+	if countAction(inst.Records, "reconsider_decided") != 1 {
+		t.Fatal("一轮只能形成一个决定")
+	}
+	if len(inst.CompensatedNodes) != 0 {
+		t.Fatalf("拒绝复议必须保留已生效动作，不得触发补偿: %v", inst.CompensatedNodes)
+	}
+	if inst.WaitNode != "audit" || inst.Status != model.StatusWaiting {
+		t.Fatalf("拒绝后应保留原决定并停在原后续等待点, got %s/%s", inst.Status, inst.WaitNode)
+	}
+	p := eng.ProgressReconsideration(def, inst, rec)
+	if p.ReceivedVotes != 2 || p.UpheldVotes != 1 || p.RejectedVotes != 1 || len(p.CompensationRemaining) != 0 {
+		t.Fatalf("进度应展示双方意见且没有补偿范围, got %+v", p)
+	}
+	if err := eng.DeliverInput(def, inst, model.ExternalInput{WaitNode: "audit", Key: "audit-1", From: "carol"}); err != nil {
+		t.Fatal(err)
+	}
+	if inst.Status != model.StatusCompleted {
+		t.Fatalf("原决定保留后原流程应继续, got %s", inst.Status)
+	}
+}
+
+func TestReconsiderVoteRequiresExplicitChoice(t *testing.T) {
+	st, eng := newTestEngine(t, filepath.Join(t.TempDir(), "data"))
+	def, inst := decidedInstance(t, st, eng)
+	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{})
+
+	err := eng.DeliverReconsiderVote(def, inst, rec.ID, model.ExternalInput{Key: "r-a", From: "alice"})
+	if err == nil {
+		t.Fatal("未明确赞成/反对的意见必须被拒绝")
+	}
+	if len(rec.Received) != 0 || inst.ConsumedInputs["r-a"] || rec.Decided {
+		t.Fatal("无效意见不得计入、消费幂等键或形成决定")
+	}
+}
+
+func TestReconsiderVoteChoicesSurviveRestartAndOppositionDecides(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	def, inst := decidedInstance(t, st, eng)
+	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{TimeoutSeconds: 1})
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-a", "alice", "uphold")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+
+	st2, eng2 := newTestEngine(t, dir)
+	inst2, err := st2.GetInstance(inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec2 := engine.FindReconsideration(inst2, rec.ID)
+	if got := rec2.Received["alice"].Choice; got != "uphold" {
+		t.Fatalf("重启后赞成选择应保留, got %q", got)
+	}
+	deadline := time.Now().UTC().Add(time.Hour)
+	rec2.Deadline = &deadline
+	if err := eng2.DeliverReconsiderVote(def, inst2, rec.ID, recVote("r-b", "bob", "rejected")); err != nil {
+		t.Fatal(err)
+	}
+	if rec2.Decision != "rejected" || len(inst2.CompensatedNodes) != 0 {
+		t.Fatalf("重启后反对应拒绝且不补偿, got decision=%s compensated=%v", rec2.Decision, inst2.CompensatedNodes)
+	}
+	if countAction(inst2.Records, "reconsider_decided") != 1 {
+		t.Fatal("重启前后仍只能形成一个决定")
 	}
 }
 
@@ -166,7 +256,7 @@ func TestReconsiderDelegationRevokedMidRound(t *testing.T) {
 		GrantDelegations: map[string]string{"carol": "alice"},
 	})
 	// alice confirms for herself and as carol's delegate: 2/3, no decision.
-	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, model.ExternalInput{Key: "r-a", From: "alice"}); err != nil {
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-a", "alice", "uphold")); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Decided {
@@ -178,20 +268,23 @@ func TestReconsiderDelegationRevokedMidRound(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, model.ExternalInput{Key: "r-b", From: "bob"}); err != nil {
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-b", "bob", "uphold")); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Decided {
 		t.Fatal("carol 委托被撤回后需本人确认，2/3 不应形成决定")
 	}
-	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, model.ExternalInput{Key: "r-c", From: "carol"}); err != nil {
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-c", "carol", "rejected")); err != nil {
 		t.Fatal(err)
 	}
-	if !rec.Decided || rec.Decision != "upheld" {
-		t.Fatalf("全部确认后应形成 upheld, got %v/%s", rec.Decided, rec.Decision)
+	if !rec.Decided || rec.Decision != "rejected" {
+		t.Fatalf("委托撤回后本人反对应形成 rejected, got %v/%s", rec.Decided, rec.Decision)
 	}
 	if countAction(inst.Records, "reconsider_decided") != 1 {
 		t.Fatal("复议决定唯一")
+	}
+	if inst.CompensatedNodes["pack"] {
+		t.Fatal("反对导致复议拒绝时不得补偿已生效动作")
 	}
 }
 
@@ -199,7 +292,7 @@ func TestReconsiderUpheldCompensatesOnlyFollowUps(t *testing.T) {
 	st, eng := newTestEngine(t, filepath.Join(t.TempDir(), "data"))
 	def, inst := decidedInstance(t, st, eng)
 	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{})
-	for _, in := range []model.ExternalInput{{Key: "r-a", From: "alice"}, {Key: "r-b", From: "bob"}} {
+	for _, in := range []model.ExternalInput{recVote("r-a", "alice", "uphold"), recVote("r-b", "bob", "uphold")} {
 		if err := eng.DeliverReconsiderVote(def, inst, rec.ID, in); err != nil {
 			t.Fatal(err)
 		}
@@ -235,7 +328,7 @@ func TestReconsiderCompensationFailureKeepsRemaining(t *testing.T) {
 	def, inst := decidedInstance(t, st, eng)
 	inst.Data["compFailAt"] = "pack"
 	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{})
-	for _, in := range []model.ExternalInput{{Key: "r-a", From: "alice"}, {Key: "r-b", From: "bob"}} {
+	for _, in := range []model.ExternalInput{recVote("r-a", "alice", "uphold"), recVote("r-b", "bob", "uphold")} {
 		if err := eng.DeliverReconsiderVote(def, inst, rec.ID, in); err != nil {
 			t.Fatal(err)
 		}
@@ -309,7 +402,7 @@ func TestReconsiderRejectedResumesFlow(t *testing.T) {
 	st, eng := newTestEngine(t, filepath.Join(t.TempDir(), "data"))
 	def, inst := decidedInstance(t, st, eng)
 	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{Participants: []string{"alice"}})
-	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, model.ExternalInput{Key: "r-a", From: "alice"}); err != nil {
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, recVote("r-a", "alice", "uphold")); err != nil {
 		t.Fatal(err)
 	}
 	if rec.Decision != "upheld" {

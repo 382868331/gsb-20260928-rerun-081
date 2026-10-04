@@ -134,6 +134,67 @@ func recEffectiveSubmitters(rec *model.Reconsideration) map[string]string {
 	return out
 }
 
+func reconsiderVoteChoice(payload map[string]any) (string, error) {
+	raw, ok := payload["choice"]
+	if !ok {
+		raw, ok = payload["vote"]
+	}
+	if !ok {
+		raw, ok = payload["decision"]
+	}
+	choice := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+	switch choice {
+	case "uphold", "approve", "approved", "yes", "赞成", "同意", "复议通过":
+		return "uphold", nil
+	case "reject", "rejected", "no", "反对", "不同意", "复议不成立":
+		return "rejected", nil
+	default:
+		return "", fmt.Errorf("复议意见必须明确选择 upheld（赞成撤销）或 rejected（反对撤销）")
+	}
+}
+
+type reconsiderTally struct {
+	Total    int
+	Received int
+	Upheld   int
+	Rejected int
+}
+
+func tallyReconsiderVotes(rec *model.Reconsideration) reconsiderTally {
+	effective := recEffectiveSubmitters(rec)
+	t := reconsiderTally{Total: len(rec.Participants)}
+	for _, participant := range rec.Participants {
+		vote, ok := rec.Received[effective[participant]]
+		if !ok {
+			continue
+		}
+		t.Received++
+		if vote.Choice == "rejected" {
+			t.Rejected++
+		} else {
+			t.Upheld++
+		}
+	}
+	return t
+}
+
+func (e *Engine) settleReconsiderVotes(def *model.Definition, inst *model.Instance, rec *model.Reconsideration) {
+	if rec.Decided {
+		return
+	}
+	t := tallyReconsiderVotes(rec)
+	if t.Received < t.Total {
+		return
+	}
+	if t.Rejected > 0 {
+		e.decideReconsideration(def, inst, rec, "rejected",
+			fmt.Sprintf("本轮 %d 方已表达：赞成撤销 %d 票、反对撤销 %d 票；存在反对，复议不成立", t.Total, t.Upheld, t.Rejected))
+		return
+	}
+	e.decideReconsideration(def, inst, rec, "upheld",
+		fmt.Sprintf("本轮 %d 方均赞成撤销原决定", t.Total))
+}
+
 // DeliverReconsiderVote records one party's vote on an open round. Votes
 // and materials of this round never merge into instance data, so history
 // cannot be rewritten to look as if the original decision never passed.
@@ -174,23 +235,26 @@ func (e *Engine) DeliverReconsiderVote(def *model.Definition, inst *model.Instan
 			fmt.Sprintf("参与方 %s 在本轮已表达过意见，重复输入 %s 忽略", input.From, input.Key))
 		return nil
 	}
+	choice, err := reconsiderVoteChoice(input.Payload)
+	if err != nil {
+		return err
+	}
 	inst.ConsumedInputs[input.Key] = true
 	rec.Received[input.From] = model.PartyInput{
-		Key: input.Key, From: input.From, Payload: input.Payload, AuthID: rec.ID, At: time.Now().UTC(),
+		Key: input.Key, From: input.From, Choice: choice, Payload: input.Payload, AuthID: rec.ID, At: time.Now().UTC(),
 	}
-	total := len(rec.Participants)
-	done := 0
-	for _, sub := range effective {
-		if _, ok := rec.Received[sub]; ok {
-			done++
-		}
+	t := tallyReconsiderVotes(rec)
+	choiceLabel := "赞成撤销原决定"
+	if choice == "rejected" {
+		choiceLabel = "反对撤销原决定"
 	}
 	e.addRecord(inst, rec.WaitNode, "", "reconsider_vote", model.NodeEntered,
-		fmt.Sprintf("复议 %s：%s 已表达意见（%d/%d）；未集齐前不形成决定", rec.ID, input.From, done, total))
-	if done < total {
+		fmt.Sprintf("复议 %s：%s 明确%s（已收到 %d/%d；赞成 %d、反对 %d）；集齐前不形成决定，集齐后只要有反对即拒绝复议",
+			rec.ID, input.From, choiceLabel, t.Received, t.Total, t.Upheld, t.Rejected))
+	if t.Received < t.Total {
 		return nil
 	}
-	e.decideReconsideration(def, inst, rec, "upheld", fmt.Sprintf("本轮 %d 方全部确认原决定依据有误", total))
+	e.settleReconsiderVotes(def, inst, rec)
 	return nil
 }
 
@@ -336,17 +400,7 @@ func (e *Engine) UpdateReconsiderScope(def *model.Definition, inst *model.Instan
 		fmt.Sprintf("复议 %s 范围变更（参与方 %s；委托 %v）；仍计入的意见：[%s]；不再计入（仅作历史保留）：[%s]；原决定的授权范围不受影响",
 			rec.ID, strings.Join(rec.Participants, "、"), rec.Delegations,
 			strings.Join(counting, "、"), strings.Join(dropped, "、")))
-	// The new scope may already be fully confirmed.
-	total := len(rec.Participants)
-	done := 0
-	for _, sub := range effective {
-		if _, ok := rec.Received[sub]; ok {
-			done++
-		}
-	}
-	if done >= total && total > 0 {
-		e.decideReconsideration(def, inst, rec, "upheld", fmt.Sprintf("范围变更后本轮 %d 方已全部确认", total))
-	}
+	e.settleReconsiderVotes(def, inst, rec)
 	return nil
 }
 
@@ -381,6 +435,10 @@ type ReconsiderProgress struct {
 	PausableAhead         []string `json:"pausableAhead"`
 	Compensated           []string `json:"compensated,omitempty"`
 	CompensationRemaining []string `json:"compensationRemaining,omitempty"`
+	TotalVotes            int      `json:"totalVotes"`
+	ReceivedVotes         int      `json:"receivedVotes"`
+	UpheldVotes           int      `json:"upheldVotes"`
+	RejectedVotes         int      `json:"rejectedVotes"`
 }
 
 // ProgressReconsideration computes the progress view for one round.
@@ -394,6 +452,11 @@ func (e *Engine) ProgressReconsideration(def *model.Definition, inst *model.Inst
 		Open:              !rec.Decided,
 		Decision:          rec.Decision,
 	}
+	tally := tallyReconsiderVotes(rec)
+	p.TotalVotes = tally.Total
+	p.ReceivedVotes = tally.Received
+	p.UpheldVotes = tally.Upheld
+	p.RejectedVotes = tally.Rejected
 	executed := map[string]bool{}
 	var executedOrder []string
 	for _, r := range inst.Records {
@@ -403,10 +466,11 @@ func (e *Engine) ProgressReconsideration(def *model.Definition, inst *model.Inst
 		}
 	}
 	p.ExecutedAfterDecision = executedOrder
+	compensationOrdered := rec.Decided && (rec.Decision == "upheld" || rec.Decision == "expired_upheld")
 	for _, id := range executedOrder {
 		if inst.CompensatedNodes[id] {
 			p.Compensated = append(p.Compensated, id)
-		} else {
+		} else if compensationOrdered {
 			p.CompensationRemaining = append(p.CompensationRemaining, id)
 		}
 	}

@@ -84,10 +84,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body)
     }),
-  reconsiderVote: (id: string, rid: string, key: string, from: string, payload: Record<string, unknown>) =>
+  reconsiderVote: (id: string, rid: string, key: string, from: string, choice: "uphold" | "rejected", comment?: string) =>
     req<Instance>("/api/instances/" + id + "/reconsiderations/" + rid + "/inputs", {
       method: "POST",
-      body: JSON.stringify({ key, from, payload })
+      body: JSON.stringify({ key, from, payload: { choice, comment: comment || undefined } })
     }),
   reconsiderScope: (id: string, rid: string, body: { revokeDelegations?: string[]; grantDelegations?: Record<string, string>; participants?: string[]; reason?: string }) =>
     req<Instance>("/api/instances/" + id + "/reconsiderations/" + rid + "/scope", {

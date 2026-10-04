@@ -197,6 +197,7 @@ type ExternalInput struct {
 type PartyInput struct {
 	Key     string         `json:"key"`
 	From    string         `json:"from"`
+	Choice  string         `json:"choice,omitempty"` // reconsideration: upheld | rejected
 	Payload map[string]any `json:"payload,omitempty"`
 	AuthID  string         `json:"authId"`
 	At      time.Time      `json:"at"`

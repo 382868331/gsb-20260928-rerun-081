@@ -27,7 +27,7 @@ Go 流程引擎 + React 流程编辑器。第一轮交付：
 
 - **决定复议**：协作决定通过并推进后续步骤后，可针对该决定发起复议（`POST /api/instances/{id}/reconsiderations`）。复议与原决定相连：原赞成、委托与生效范围原样保留（`waitDecisions` 审计），本轮参与范围与新资料只影响本次复议，不改写历史
 - **复议期间可见进度**：`GET /api/instances/{id}/reconsiderations/{rid}` 返回原决定已推进到哪里——已执行的后续动作（只能按流程补偿）与尚可暂停的步骤；复议未决期间后续输入被暂扣（`input_held`），resume 不推进
-- **唯一决定**：复议通过 / 拒绝 / 到期各自只形成一个决定（`reconsider_decided`）；旧投票的幂等键已被消费，不能凑新一轮人数；复议通过只补偿原决定**之后**执行的动作（scoped 补偿），补偿期间原业务动作不会再被推动
+- **唯一决定**：每方必须明确提交 `payload.choice = upheld`（赞成撤销）或 `rejected`（反对撤销）；集齐本轮意见后全票赞成才复议通过，任一票反对即拒绝。通过 / 拒绝 / 到期各自只形成一个决定（`reconsider_decided`）；旧投票的幂等键已被消费，不能凑新一轮人数；拒绝时保留原决定和已生效动作、不触发补偿；复议通过只补偿原决定**之后**执行的动作（scoped 补偿），补偿期间原业务动作不会再被推动
 - **交错与补偿失败**：部分新意见、委托撤回（`POST .../reconsiderations/{rid}/scope`）、原后续步骤失败与复议到期可任意交错（实例级锁 + 到期优先判定）；补偿失败保留未完成范围（`reconsider_compensation_incomplete`），复议结束不会显示全部恢复；重启后可沿原决定、复议依据与每条真实事件解释当前状态
 
 ## 目录
@@ -75,7 +75,7 @@ cd ../backend && go run ./cmd/server -static ../frontend/dist
 - `POST /api/instances/{id}/timeout` 对协作等待立即做一次到期判定（决定最多形成一次）
 - `POST /api/instances/{id}/reconsiderations` 对已通过的协作决定发起复议 `{waitNode, participants, allowDelegate, grantDelegations, materials, reason, timeoutSeconds, timeoutPolicy}`
 - `GET  /api/instances/{id}/reconsiderations/{rid}` 复议进度视图（已执行待补偿 / 尚可暂停 / 未完成补偿范围）
-- `POST /api/instances/{id}/reconsiderations/{rid}/inputs` 提交本轮复议意见 `{key, from, payload}`
+- `POST /api/instances/{id}/reconsiderations/{rid}/inputs` 提交本轮复议意见 `{key, from, payload:{choice:"uphold"|"rejected"}}`
 - `POST /api/instances/{id}/reconsiderations/{rid}/scope` 变更本轮范围（授予/撤回委托、调整参与方）
 - `POST /api/instances/{id}/reconsiderations/{rid}/timeout` 复议到期判定（`timeoutPolicy: "uphold"` 到期视为复议通过，默认复议不成立）
 
