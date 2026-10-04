@@ -115,11 +115,11 @@ func TestHTTPReconsiderationFlow(t *testing.T) {
 		t.Fatalf("已执行待补偿应为 [t2], got %v", view.Progress.ExecutedAfterDecision)
 	}
 	do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "k-a", "from": "a"}, &inst)
-	do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "r-a", "from": "a"}, &inst)
+	do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "r-a", "from": "a", "payload": map[string]any{"opinion": "uphold"}}, &inst)
 	if !inst.Reconsidering {
 		t.Fatal("部分意见不应结束复议")
 	}
-	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "r-b", "from": "b"}, &inst); c != 200 {
+	if c := do(t, h, "POST", "/api/instances/"+inst.ID+"/reconsiderations/"+rid+"/inputs", map[string]any{"key": "r-b", "from": "b", "payload": map[string]any{"opinion": "uphold"}}, &inst); c != 200 {
 		t.Fatal("vote b")
 	}
 	if !inst.CompensatedNodes["t2"] || inst.CompensatedNodes["t1"] {

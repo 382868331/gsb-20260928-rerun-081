@@ -134,6 +134,61 @@ func recEffectiveSubmitters(rec *model.Reconsideration) map[string]string {
 	return out
 }
 
+// recVoteOpinion extracts the explicit opinion of a reconsideration vote:
+// "uphold" (support the review, overturn the original decision) or
+// "reject" (oppose the review, keep the original decision). Anything else
+// means the vote did not state a recognizable opinion.
+func recVoteOpinion(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	v, ok := payload["opinion"].(string)
+	if !ok {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "uphold", "support", "approve":
+		return "uphold"
+	case "reject", "oppose":
+		return "reject"
+	}
+	return ""
+}
+
+// recTally counts, among the currently effective submitters, how many
+// received votes support vs oppose the review.
+func recTally(rec *model.Reconsideration) (support, oppose, done, total int) {
+	effective := recEffectiveSubmitters(rec)
+	total = len(rec.Participants)
+	for _, sub := range effective {
+		pi, ok := rec.Received[sub]
+		if !ok {
+			continue
+		}
+		done++
+		if recVoteOpinion(pi.Payload) == "reject" {
+			oppose++
+		} else {
+			support++
+		}
+	}
+	return
+}
+
+// decideByVotes forms the round's decision from the actual opinions: the
+// review passes only when every effective participant explicitly supports
+// overturning the original decision; any explicit opposition rejects it.
+func (e *Engine) decideReconsiderationByVotes(def *model.Definition, inst *model.Instance, rec *model.Reconsideration) {
+	support, oppose, _, total := recTally(rec)
+	if oppose > 0 {
+		e.decideReconsideration(def, inst, rec, "rejected",
+			fmt.Sprintf("本轮 %d 方意见已集齐：%d 方支持复议、%d 方反对；存在反对意见，复议不成立，原决定继续有效", total, support, oppose))
+		return
+	}
+	e.decideReconsideration(def, inst, rec, "upheld",
+		fmt.Sprintf("本轮 %d 方一致支持复议，确认原决定依据有误", total))
+}
+
 // DeliverReconsiderVote records one party's vote on an open round. Votes
 // and materials of this round never merge into instance data, so history
 // cannot be rewritten to look as if the original decision never passed.
@@ -174,23 +229,24 @@ func (e *Engine) DeliverReconsiderVote(def *model.Definition, inst *model.Instan
 			fmt.Sprintf("参与方 %s 在本轮已表达过意见，重复输入 %s 忽略", input.From, input.Key))
 		return nil
 	}
+	opinion := recVoteOpinion(input.Payload)
+	if opinion == "" {
+		// An opinion-less vote must never be read as approval.
+		return fmt.Errorf("复议意见必须明确表态：payload.opinion 取 \"uphold\"（支持复议、撤销原决定）或 \"reject\"（反对复议、维持原决定）")
+	}
 	inst.ConsumedInputs[input.Key] = true
 	rec.Received[input.From] = model.PartyInput{
 		Key: input.Key, From: input.From, Payload: input.Payload, AuthID: rec.ID, At: time.Now().UTC(),
 	}
-	total := len(rec.Participants)
-	done := 0
-	for _, sub := range effective {
-		if _, ok := rec.Received[sub]; ok {
-			done++
-		}
-	}
+	support, oppose, done, total := recTally(rec)
+	opinionLabel := map[string]string{"uphold": "支持复议", "reject": "反对复议"}[opinion]
 	e.addRecord(inst, rec.WaitNode, "", "reconsider_vote", model.NodeEntered,
-		fmt.Sprintf("复议 %s：%s 已表达意见（%d/%d）；未集齐前不形成决定", rec.ID, input.From, done, total))
+		fmt.Sprintf("复议 %s：%s 明确表态【%s】（已收到 %d/%d：支持 %d、反对 %d）；未集齐前不形成决定",
+			rec.ID, input.From, opinionLabel, done, total, support, oppose))
 	if done < total {
 		return nil
 	}
-	e.decideReconsideration(def, inst, rec, "upheld", fmt.Sprintf("本轮 %d 方全部确认原决定依据有误", total))
+	e.decideReconsiderationByVotes(def, inst, rec)
 	return nil
 }
 
@@ -337,15 +393,9 @@ func (e *Engine) UpdateReconsiderScope(def *model.Definition, inst *model.Instan
 			rec.ID, strings.Join(rec.Participants, "、"), rec.Delegations,
 			strings.Join(counting, "、"), strings.Join(dropped, "、")))
 	// The new scope may already be fully confirmed.
-	total := len(rec.Participants)
-	done := 0
-	for _, sub := range effective {
-		if _, ok := rec.Received[sub]; ok {
-			done++
-		}
-	}
+	_, _, done, total := recTally(rec)
 	if done >= total && total > 0 {
-		e.decideReconsideration(def, inst, rec, "upheld", fmt.Sprintf("范围变更后本轮 %d 方已全部确认", total))
+		e.decideReconsiderationByVotes(def, inst, rec)
 	}
 	return nil
 }

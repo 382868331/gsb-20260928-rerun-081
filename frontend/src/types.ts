@@ -96,6 +96,7 @@ export interface PartyInput {
   from: string;
   authId: string;
   at: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface WaitAuthorization {
