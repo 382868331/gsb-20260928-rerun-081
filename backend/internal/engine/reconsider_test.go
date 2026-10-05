@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -439,5 +440,165 @@ func TestReconsiderRejectedAllowsNewRound(t *testing.T) {
 	}
 	if len(rec2.Received) != 0 {
 		t.Fatal("旧投票不能计入新一轮")
+	}
+}
+
+func restartEngine(t *testing.T, dir string) (*store.Store, *engine.Engine, *model.Definition, *model.Instance) {
+	t.Helper()
+	ids, err := filepath.Glob(filepath.Join(dir, "instances", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("应有一个实例文件, got %d", len(ids))
+	}
+	base := filepath.Base(ids[0])
+	id := strings.TrimSuffix(base, ".json")
+	st2, eng2 := newTestEngine(t, dir)
+	inst2, err := st2.GetInstance(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def2, err := st2.GetDefinition(inst2.DefinitionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st2, eng2, def2, inst2
+}
+
+// One opposition rejects the round: the already effective actions stay in
+// effect and must never be presented as a compensation todo, including after
+// a reload ("refresh / restart"). Replaying old inputs changes nothing.
+func TestReconsiderOneOppositionKeepsActionsAcrossRestart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	def, inst := decidedInstance(t, st, eng)
+	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{})
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, upholdVote("r-a", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.DeliverReconsiderVote(def, inst, rec.ID, rejectVote("r-b", "bob")); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Decision != "rejected" {
+		t.Fatalf("一票反对应拒绝复议, got %s", rec.Decision)
+	}
+	p := eng.ProgressReconsideration(def, inst, rec)
+	if len(p.RetainedAfterDecision) != 1 || p.RetainedAfterDecision[0] != "pack" {
+		t.Fatalf("拒绝后应只展示继续有效的动作 [pack], got %v", p.RetainedAfterDecision)
+	}
+	if len(p.CompensationRemaining) != 0 {
+		t.Fatalf("拒绝后不得有待补偿范围, got %v", p.CompensationRemaining)
+	}
+	if len(p.PausableAhead) != 0 {
+		t.Fatalf("拒绝后原流程恢复, 不应再有暂停步骤, got %v", p.PausableAhead)
+	}
+	if err := st.SaveInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+
+	_, eng2, def2, inst2 := restartEngine(t, dir)
+	rec2 := engine.FindReconsideration(inst2, rec.ID)
+	if rec2 == nil || !rec2.Decided || rec2.Decision != "rejected" {
+		t.Fatal("重启后唯一决定仍为 rejected")
+	}
+	if len(rec2.Received) != 2 || inst2.WaitDecisions[0].Decision != "approved" {
+		t.Fatal("重启后历史表态与原决定应完整保留")
+	}
+	p2 := eng2.ProgressReconsideration(def2, inst2, rec2)
+	if len(p2.RetainedAfterDecision) != 1 || p2.RetainedAfterDecision[0] != "pack" || len(p2.CompensationRemaining) != 0 {
+		t.Fatalf("重启后保留动作与待补偿应吻合, got %+v", p2)
+	}
+	// Replaying consumed keys after the conclusion must not change anything.
+	before := len(inst2.Records)
+	if err := eng2.DeliverReconsiderVote(def2, inst2, rec.ID, rejectVote("r-b", "bob")); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng2.DeliverReconsiderVote(def2, inst2, rec.ID, upholdVote("orig-a", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	if rec2.Decision != "rejected" || len(rec2.Received) != 2 || len(inst2.Records) != before+2 {
+		t.Fatal("重复旧输入不得改变已形成的结论")
+	}
+}
+
+// Unanimous support with a failing compensation: only the actually
+// uncompensated scope becomes the todo, and it survives restart.
+func TestReconsiderUnanimousUpholdCompFailAcrossRestart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	def, inst := decidedInstance(t, st, eng)
+	inst.Data["compFailAt"] = "pack"
+	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{})
+	for _, in := range []model.ExternalInput{upholdVote("r-a", "alice"), upholdVote("r-b", "bob")} {
+		if err := eng.DeliverReconsiderVote(def, inst, rec.ID, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rec.Decision != "upheld" {
+		t.Fatalf("一致赞成应撤销原决定, got %s", rec.Decision)
+	}
+	p := eng.ProgressReconsideration(def, inst, rec)
+	if len(p.CompensationRemaining) != 1 || p.CompensationRemaining[0] != "pack" {
+		t.Fatalf("实际未补偿范围才是待办 [pack], got %v", p.CompensationRemaining)
+	}
+	if len(p.RetainedAfterDecision) != 0 {
+		t.Fatalf("撤销后不存在继续保留的动作, got %v", p.RetainedAfterDecision)
+	}
+	if err := st.SaveInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+
+	_, eng2, def2, inst2 := restartEngine(t, dir)
+	rec2 := engine.FindReconsideration(inst2, rec.ID)
+	if rec2.Decision != "upheld" || len(rec2.Received) != 2 {
+		t.Fatal("重启后决定与历史表态应吻合")
+	}
+	p2 := eng2.ProgressReconsideration(def2, inst2, rec2)
+	if len(p2.CompensationRemaining) != 1 || p2.CompensationRemaining[0] != "pack" {
+		t.Fatalf("重启后补偿待办应保留 [pack], got %v", p2.CompensationRemaining)
+	}
+	before := len(inst2.Records)
+	if err := eng2.DeliverReconsiderVote(def2, inst2, rec.ID, upholdVote("r-a", "alice")); err != nil {
+		t.Fatal(err)
+	}
+	if rec2.Decision != "upheld" || len(rec2.Received) != 2 || len(inst2.Records) != before+1 {
+		t.Fatal("重复旧输入不得改变已形成的结论")
+	}
+}
+
+// Expiry with the default policy rejects the review: actions stay in effect,
+// no compensation todo, and the conclusion is stable across restart.
+func TestReconsiderExpiredRejectKeepsActionsAcrossRestart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	st, eng := newTestEngine(t, dir)
+	def, inst := decidedInstance(t, st, eng)
+	rec := openRec(t, eng, def, inst, engine.ReconsiderRequest{TimeoutSeconds: 1})
+	past := time.Now().UTC().Add(-time.Second)
+	rec.Deadline = &past
+	eng.CheckReconsiderTimeout(def, inst, time.Now().UTC())
+	if rec.Decision != "expired_rejected" {
+		t.Fatalf("got %s", rec.Decision)
+	}
+	p := eng.ProgressReconsideration(def, inst, rec)
+	if len(p.RetainedAfterDecision) != 1 || p.RetainedAfterDecision[0] != "pack" || len(p.CompensationRemaining) != 0 {
+		t.Fatalf("到期拒绝应展示保留动作且无待补偿, got %+v", p)
+	}
+	if err := st.SaveInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+
+	_, eng2, def2, inst2 := restartEngine(t, dir)
+	rec2 := engine.FindReconsideration(inst2, rec.ID)
+	if rec2.Decision != "expired_rejected" {
+		t.Fatal("重启后唯一决定仍为 expired_rejected")
+	}
+	p2 := eng2.ProgressReconsideration(def2, inst2, rec2)
+	if len(p2.RetainedAfterDecision) != 1 || len(p2.CompensationRemaining) != 0 {
+		t.Fatalf("重启后含义应一致, got %+v", p2)
+	}
+	eng2.CheckReconsiderTimeout(def2, inst2, time.Now().UTC())
+	if n := countAction(inst2.Records, "reconsider_decided"); n != 1 {
+		t.Fatalf("重复到期判定不得再形成决定, got %d", n)
 	}
 }

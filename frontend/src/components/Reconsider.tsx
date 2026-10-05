@@ -141,7 +141,11 @@ export function ReconsiderSection({
             {shown.decided ? <>已结束，唯一决定：<b>{DECISION_LABEL[shown.decision || ""] || shown.decision}</b></> : <b>进行中，后续动作已暂停</b>}
           </p>
           {shown.decided && (shown.decision === "rejected" || shown.decision === "expired_rejected") && (
-            <p className="hint">复议不成立：原决定与已生效的动作全部保留，未触发任何补偿。</p>
+            <p className="hint">
+              复议不成立：原决定继续有效，已生效的动作全部保留（继续有效：
+              {progress.retainedAfterDecision?.length ? progress.retainedAfterDecision.join("、") : "无"}
+              ），未触发任何补偿；这些动作不是撤销待办。
+            </p>
           )}
           {shown.decided && (shown.decision === "upheld" || shown.decision === "expired_upheld") && (
             <p className="hint">
@@ -151,12 +155,21 @@ export function ReconsiderSection({
                 : "原决定之后的动作均已补偿。"}
             </p>
           )}
-          <p className="hint">原决定已推进到：已执行（只能按流程补偿）：
-            {progress.executedAfterDecision.length ? progress.executedAfterDecision.join("、") : "无"}
-            {progress.compensationRemaining?.length ? "；待补偿：" + progress.compensationRemaining.join("、") : ""}
-            {progress.compensated?.length ? "；已补偿：" + progress.compensated.join("、") : ""}
-          </p>
-          <p className="hint">尚可暂停的后续步骤：{progress.pausableAhead.length ? progress.pausableAhead.join("、") : "无"}</p>
+          {shown.decided && (shown.decision === "rejected" || shown.decision === "expired_rejected") ? (
+            <p className="hint">原决定已推进且继续保留的动作：
+              {progress.retainedAfterDecision?.length ? progress.retainedAfterDecision.join("、") : "无"}
+              ；复议未撤销原决定，不存在补偿待办。
+            </p>
+          ) : (
+            <>
+              <p className="hint">原决定已推进到：已执行（只能按流程补偿）：
+                {progress.executedAfterDecision.length ? progress.executedAfterDecision.join("、") : "无"}
+                {progress.compensationRemaining?.length ? "；待补偿：" + progress.compensationRemaining.join("、") : ""}
+                {progress.compensated?.length ? "；已补偿：" + progress.compensated.join("、") : ""}
+              </p>
+              <p className="hint">尚可暂停的后续步骤：{progress.pausableAhead.length ? progress.pausableAhead.join("、") : "无"}</p>
+            </>
+          )}
           {!shown.decided && (
             <>
               <p className="hint">

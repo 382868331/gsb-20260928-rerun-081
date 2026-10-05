@@ -431,6 +431,10 @@ type ReconsiderProgress struct {
 	PausableAhead         []string `json:"pausableAhead"`
 	Compensated           []string `json:"compensated,omitempty"`
 	CompensationRemaining []string `json:"compensationRemaining,omitempty"`
+	// RetainedAfterDecision: actions that stay in effect because the original
+	// decision stands (review rejected or expired-rejected). They are not a
+	// compensation todo and never appear in CompensationRemaining.
+	RetainedAfterDecision []string `json:"retainedAfterDecision,omitempty"`
 }
 
 // ProgressReconsideration computes the progress view for one round.
@@ -444,6 +448,8 @@ func (e *Engine) ProgressReconsideration(def *model.Definition, inst *model.Inst
 		Open:              !rec.Decided,
 		Decision:          rec.Decision,
 	}
+	rejected := rec.Decided && (rec.Decision == "rejected" || rec.Decision == "expired_rejected")
+	upheld := rec.Decided && (rec.Decision == "upheld" || rec.Decision == "expired_upheld")
 	executed := map[string]bool{}
 	var executedOrder []string
 	for _, r := range inst.Records {
@@ -453,21 +459,34 @@ func (e *Engine) ProgressReconsideration(def *model.Definition, inst *model.Inst
 		}
 	}
 	p.ExecutedAfterDecision = executedOrder
-	for _, id := range executedOrder {
-		if inst.CompensatedNodes[id] {
-			p.Compensated = append(p.Compensated, id)
-		} else {
-			p.CompensationRemaining = append(p.CompensationRemaining, id)
+	if rejected {
+		// The review failed: the original decision and every action it caused
+		// remain in effect. These actions are kept, not pending undo, so the
+		// page must never present them as a compensation todo.
+		p.RetainedAfterDecision = append(p.RetainedAfterDecision, executedOrder...)
+	} else {
+		// Open round: nothing is decided yet, so executed actions are only
+		// potentially compensable. Upheld round: only the scope that actually
+		// failed to compensate is a todo; already compensated actions are done.
+		for _, id := range executedOrder {
+			if inst.CompensatedNodes[id] {
+				p.Compensated = append(p.Compensated, id)
+			} else if upheld {
+				p.CompensationRemaining = append(p.CompensationRemaining, id)
+			}
 		}
 	}
 	// Pausable: nodes reachable from the current stop that never executed.
-	from := inst.WaitNode
-	if from == "" {
-		from = effectiveStop(inst)
-	}
-	for id := range reachableFrom(def, from) {
-		if !executed[id] && id != rec.WaitNode {
-			p.PausableAhead = append(p.PausableAhead, id)
+	// After rejection the original flow resumes, so nothing stays paused.
+	if !rejected {
+		from := inst.WaitNode
+		if from == "" {
+			from = effectiveStop(inst)
+		}
+		for id := range reachableFrom(def, from) {
+			if !executed[id] && id != rec.WaitNode {
+				p.PausableAhead = append(p.PausableAhead, id)
+			}
 		}
 	}
 	sort.Strings(p.PausableAhead)
