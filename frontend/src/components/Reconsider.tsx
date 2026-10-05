@@ -141,7 +141,10 @@ export function ReconsiderSection({
             {shown.decided ? <>已结束，唯一决定：<b>{DECISION_LABEL[shown.decision || ""] || shown.decision}</b></> : <b>进行中，后续动作已暂停</b>}
           </p>
           {shown.decided && (shown.decision === "rejected" || shown.decision === "expired_rejected") && (
-            <p className="hint">复议不成立：原决定与已生效的动作全部保留，未触发任何补偿。</p>
+            <p className="hint">
+              复议不成立：原决定继续有效，已生效动作（{progress.retainedActions?.length ? progress.retainedActions.join("、") : "无"}）全部保留，
+              不是补偿待办，未触发任何补偿；后续动作恢复可推进。
+            </p>
           )}
           {shown.decided && (shown.decision === "upheld" || shown.decision === "expired_upheld") && (
             <p className="hint">
@@ -151,12 +154,30 @@ export function ReconsiderSection({
                 : "原决定之后的动作均已补偿。"}
             </p>
           )}
-          <p className="hint">原决定已推进到：已执行（只能按流程补偿）：
-            {progress.executedAfterDecision.length ? progress.executedAfterDecision.join("、") : "无"}
-            {progress.compensationRemaining?.length ? "；待补偿：" + progress.compensationRemaining.join("、") : ""}
-            {progress.compensated?.length ? "；已补偿：" + progress.compensated.join("、") : ""}
-          </p>
-          <p className="hint">尚可暂停的后续步骤：{progress.pausableAhead.length ? progress.pausableAhead.join("、") : "无"}</p>
+          {!shown.decided && (
+            <>
+              <p className="hint">原决定已推进到：当前仍有效（若复议通过才需按流程补偿）：
+                {progress.retainedActions?.length ? progress.retainedActions.join("、") : "无"}
+              </p>
+              <p className="hint">尚可暂停的后续步骤：{progress.pausableAhead.length ? progress.pausableAhead.join("、") : "无"}</p>
+            </>
+          )}
+          {shown.decided && (shown.decision === "rejected" || shown.decision === "expired_rejected") && (
+            <>
+              <p className="hint">继续有效的动作：{progress.retainedActions?.length ? progress.retainedActions.join("、") : "无"}；待补偿：无</p>
+              <p className="hint">后续步骤已恢复可推进，不再处于暂停状态。</p>
+            </>
+          )}
+          {shown.decided && (shown.decision === "upheld" || shown.decision === "expired_upheld") && (
+            <>
+              <p className="hint">原决定之后已执行：
+                {progress.executedAfterDecision.length ? progress.executedAfterDecision.join("、") : "无"}
+                {progress.compensationRemaining?.length ? "；待补偿：" + progress.compensationRemaining.join("、") : "；待补偿：无"}
+                {progress.compensated?.length ? "；已补偿：" + progress.compensated.join("、") : ""}
+              </p>
+              <p className="hint">继续有效的动作：无（原决定之后的动作仅按流程补偿）；尚可暂停的后续步骤：无</p>
+            </>
+          )}
           {!shown.decided && (
             <>
               <p className="hint">

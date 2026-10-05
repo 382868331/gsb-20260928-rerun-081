@@ -267,8 +267,13 @@ func (e *Engine) decideReconsideration(def *model.Definition, inst *model.Instan
 	case "upheld", "expired_upheld":
 		e.applyUpheld(def, inst, rec)
 	default: // rejected / expired_rejected: original decision stands
+		retained := uncompensatedAfter(inst, rec.OriginSeq)
+		kept := "无"
+		if len(retained) > 0 {
+			kept = strings.Join(retained, "、")
+		}
 		e.addRecord(inst, rec.WaitNode, "", "reconsider_closed", model.NodeEntered,
-			"复议不成立，原决定继续有效；被暂停的后续动作恢复可推进状态")
+			fmt.Sprintf("复议不成立，原决定继续有效；已生效动作（%s）全部保留、不是补偿待办；被暂停的后续动作恢复可推进状态", kept))
 	}
 }
 
@@ -431,6 +436,11 @@ type ReconsiderProgress struct {
 	PausableAhead         []string `json:"pausableAhead"`
 	Compensated           []string `json:"compensated,omitempty"`
 	CompensationRemaining []string `json:"compensationRemaining,omitempty"`
+	// RetainedActions lists follow-up actions that stay in effect because
+	// the round did not overturn the original decision (rejected /
+	// expired_rejected), or actions currently effective while the round is
+	// still open. They are never compensation to-dos.
+	RetainedActions []string `json:"retainedActions,omitempty"`
 }
 
 // ProgressReconsideration computes the progress view for one round.
@@ -453,23 +463,38 @@ func (e *Engine) ProgressReconsideration(def *model.Definition, inst *model.Inst
 		}
 	}
 	p.ExecutedAfterDecision = executedOrder
-	for _, id := range executedOrder {
-		if inst.CompensatedNodes[id] {
-			p.Compensated = append(p.Compensated, id)
-		} else {
-			p.CompensationRemaining = append(p.CompensationRemaining, id)
+	switch {
+	case !rec.Decided:
+		// Round open: the executed follow-ups are still in effect; they can
+		// only be compensated if the round later passes.
+		p.RetainedActions = append(p.RetainedActions, executedOrder...)
+	case rec.Decision == "upheld" || rec.Decision == "expired_upheld":
+		// Overturned: uncompensated follow-ups are the only to-dos.
+		for _, id := range executedOrder {
+			if inst.CompensatedNodes[id] {
+				p.Compensated = append(p.Compensated, id)
+			} else {
+				p.CompensationRemaining = append(p.CompensationRemaining, id)
+			}
 		}
+	default:
+		// rejected / expired_rejected: original decision stands, so every
+		// executed follow-up remains in effect; nothing waits for
+		// compensation and nothing is paused any longer.
+		p.RetainedActions = append(p.RetainedActions, executedOrder...)
 	}
-	// Pausable: nodes reachable from the current stop that never executed.
-	from := inst.WaitNode
-	if from == "" {
-		from = effectiveStop(inst)
-	}
-	for id := range reachableFrom(def, from) {
-		if !executed[id] && id != rec.WaitNode {
-			p.PausableAhead = append(p.PausableAhead, id)
+	if !rec.Decided {
+		// Pausable: nodes reachable from the current stop that never executed.
+		from := inst.WaitNode
+		if from == "" {
+			from = effectiveStop(inst)
 		}
+		for id := range reachableFrom(def, from) {
+			if !executed[id] && id != rec.WaitNode {
+				p.PausableAhead = append(p.PausableAhead, id)
+			}
+		}
+		sort.Strings(p.PausableAhead)
 	}
-	sort.Strings(p.PausableAhead)
 	return p
 }

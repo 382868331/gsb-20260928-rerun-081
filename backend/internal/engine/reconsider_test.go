@@ -441,3 +441,135 @@ func TestReconsiderRejectedAllowsNewRound(t *testing.T) {
 		t.Fatal("旧投票不能计入新一轮")
 	}
 }
+
+// assertOutcomeConsistency verifies, including after a simulated restart,
+// that the unique decision, retained actions and compensation to-dos all
+// agree with the round's outcome, and that replaying old inputs changes
+// nothing.
+func assertOutcomeConsistency(t *testing.T, dir string, instID, recID, wantDecision string, wantRetained, wantRemaining []string) {
+	t.Helper()
+	st2, eng2 := newTestEngine(t, dir)
+	inst, err := st2.GetInstance(instID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, err := st2.GetDefinition(inst.DefinitionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := engine.FindReconsideration(inst, recID)
+	if rec == nil || !rec.Decided || rec.Decision != wantDecision {
+		got := "missing"
+		if rec != nil {
+			got = rec.Decision
+		}
+		t.Fatalf("重启后唯一决定应为 %s, got %s", wantDecision, got)
+	}
+	if countAction(inst.Records, "reconsider_decided") != 1 {
+		t.Fatal("重启后决定仍必须唯一")
+	}
+	p := eng2.ProgressReconsideration(def, inst, rec)
+	if len(p.RetainedActions) != len(wantRetained) {
+		t.Fatalf("继续有效的动作应为 %v, got %v", wantRetained, p.RetainedActions)
+	}
+	for i, id := range wantRetained {
+		if i >= len(p.RetainedActions) || p.RetainedActions[i] != id {
+			t.Fatalf("继续有效的动作应为 %v, got %v", wantRetained, p.RetainedActions)
+		}
+	}
+	if len(p.CompensationRemaining) != len(wantRemaining) {
+		t.Fatalf("待补偿应为 %v, got %v", wantRemaining, p.CompensationRemaining)
+	}
+	for i, id := range wantRemaining {
+		if i >= len(p.CompensationRemaining) || p.CompensationRemaining[i] != id {
+			t.Fatalf("待补偿应为 %v, got %v", wantRemaining, p.CompensationRemaining)
+		}
+	}
+	// Replaying old vote keys and old business inputs after restart must not
+	// alter the formed conclusion.
+	for _, in := range []model.ExternalInput{
+		{Key: "r-a", From: "alice", Payload: map[string]any{"opinion": "uphold"}},
+		{Key: "r-b", From: "bob", Payload: map[string]any{"opinion": "reject"}},
+		{Key: "orig-a", From: "alice"},
+	} {
+		if err := eng2.DeliverReconsiderVote(def, inst, recID, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng2.DeliverInput(def, inst, model.ExternalInput{WaitNode: "audit", Key: "audit-1", From: "carol"}); err != nil {
+		t.Fatal(err)
+	}
+	rec2 := engine.FindReconsideration(inst, recID)
+	if !rec2.Decided || rec2.Decision != wantDecision || countAction(inst.Records, "reconsider_decided") != 1 {
+		t.Fatal("重复旧输入不得改变已经形成的结论")
+	}
+}
+
+func TestReconsiderThreeOutcomesStayConsistentAcrossRestart(t *testing.T) {
+	cases := []struct {
+		name      string
+		compFail  bool
+		setup     func(eng *engine.Engine, def *model.Definition, inst *model.Instance, recID string)
+		decision  string
+		retained  []string
+		remaining []string
+	}{
+		{
+			name:     "一票反对",
+			decision: "rejected",
+			retained: []string{"pack"},
+			setup: func(eng *engine.Engine, def *model.Definition, inst *model.Instance, recID string) {
+				if err := eng.DeliverReconsiderVote(def, inst, recID, upholdVote("r-a", "alice")); err != nil {
+					t.Fatal(err)
+				}
+				if err := eng.DeliverReconsiderVote(def, inst, recID, rejectVote("r-b", "bob")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:      "一致赞成且补偿失败",
+			compFail:  true,
+			decision:  "upheld",
+			remaining: []string{"pack"},
+			setup: func(eng *engine.Engine, def *model.Definition, inst *model.Instance, recID string) {
+				for _, in := range []model.ExternalInput{upholdVote("r-a", "alice"), upholdVote("r-b", "bob")} {
+					if err := eng.DeliverReconsiderVote(def, inst, recID, in); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name:     "到期拒绝",
+			decision: "expired_rejected",
+			retained: []string{"pack"},
+			setup: func(eng *engine.Engine, def *model.Definition, inst *model.Instance, recID string) {
+				rec := engine.FindReconsideration(inst, recID)
+				past := time.Now().UTC().Add(-time.Second)
+				rec.Deadline = &past
+				eng.CheckReconsiderTimeout(def, inst, time.Now().UTC())
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "data")
+			st, eng := newTestEngine(t, dir)
+			def, inst := decidedInstance(t, st, eng)
+			if tc.compFail {
+				inst.Data["compFailAt"] = "pack"
+			}
+			req := engine.ReconsiderRequest{TimeoutSeconds: 1}
+			rec := openRec(t, eng, def, inst, req)
+			tc.setup(eng, def, inst, rec.ID)
+			if !rec.Decided || rec.Decision != tc.decision {
+				t.Fatalf("应形成 %s, got %s", tc.decision, rec.Decision)
+			}
+			if err := st.SaveInstance(inst); err != nil {
+				t.Fatal(err)
+			}
+			assertOutcomeConsistency(t, dir, inst.ID, rec.ID, tc.decision, tc.retained, tc.remaining)
+		})
+	}
+}

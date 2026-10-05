@@ -159,4 +159,5 @@ export interface ReconsiderProgress {
   pausableAhead: string[];
   compensated?: string[];
   compensationRemaining?: string[];
+  retainedActions?: string[];
 }
